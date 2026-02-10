@@ -56,7 +56,7 @@ struct GCSClient : common::IClient
     std::shared_ptr<Responder> _responder;
 
     std::mutex _descriptors_mutex;
-    std::map<std::string, std::shared_ptr<google::cloud::storage_experimental::AsyncObjectDescriptor>> _descriptors;
+    std::map<std::string, std::shared_ptr<google::cloud::storage_experimental::ObjectDescriptor>> _descriptors;
 };
 
 }; //namespace runai::llm::streamer::impl::gcs

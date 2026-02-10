@@ -249,15 +249,10 @@ common::ResponseCode GCSClient::async_read(const char* path, common::backend_api
                  std::cerr << "DEBUG: Triggering Read for request " << request_id << " offset=" << current_offset << " size=" << bytesize << std::endl;
                  auto read_result = descriptor_ptr->Read(current_offset, bytesize);
                  
-                 // Spawn a detached thread to handle the read loop to avoid blocking the callback thread
-                 // Capture descriptor_ptr to keep it alive
-                 std::thread([reader = std::move(read_result.first), token = std::move(read_result.second), current_buffer, bytesize, request_id, responder, counter, is_success, descriptor_ptr]() mutable {
-                     std::cerr << "DEBUG: Detached thread started for request " << request_id << std::endl;
-                     read_loop(std::move(reader), std::move(token), current_buffer, bytesize, request_id, responder, counter, is_success);
-                     std::cerr << "DEBUG: Detached thread finished initiating read_loop for request " << request_id << std::endl;
-                 }).detach();
+                 // Initiate the read loop directly on the current thread (it returns a future)
+                 read_loop(std::move(read_result.first), std::move(read_result.second), current_buffer, bytesize, request_id, responder, counter, is_success);
 
-                 std::cerr << "DEBUG: read_loop call dispatched to thread for request " << request_id << std::endl;
+                 std::cerr << "DEBUG: read_loop initiated for request " << request_id << std::endl;
                  
                  current_total -= bytesize;
                  current_offset += bytesize;
