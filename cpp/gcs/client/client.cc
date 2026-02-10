@@ -101,6 +101,10 @@ common::ResponseCode write_stream_to_buffer(
     return common::ResponseCode::Success;
 }
 
+GCSClient::~GCSClient() {
+    std::cerr << "DEBUG: GCSClient destructor called" << std::endl;
+}
+
 namespace {
     void read_loop(google::cloud::storage_experimental::AsyncReader reader,
                    google::cloud::storage_experimental::AsyncToken token,
@@ -111,37 +115,30 @@ namespace {
                    std::shared_ptr<std::atomic<unsigned>> counter,
                    std::shared_ptr<std::atomic<bool>> is_success) {
         
-        std::cerr << "DEBUG: read_loop entered for request " << request_id << " remaining=" << remaining << std::endl;
+        // std::cerr << "DEBUG: read_loop entered for request " << request_id << " remaining=" << remaining << std::endl; // Too spammy for recursive calls
 
-        std::cerr << "DEBUG: Calling reader.Read(token) for request " << request_id << std::endl;
-        auto read_future = reader.Read(std::move(token));
-        std::cerr << "DEBUG: reader.Read(token) returned future (valid=" << read_future.valid() << "). Attaching .then callback..." << std::endl;
-        
-        read_future.then([reader = std::move(reader), buffer, remaining, request_id, responder, counter, is_success](auto f) mutable {
-            std::cerr << "DEBUG: AsyncReader callback invoked for request " << request_id << std::endl;
-            auto result = f.get();
-            if (!result) {
-                std::cerr << "DEBUG ERROR: AsyncReader Read failed for request " << request_id << ": " << result.status().message() << std::endl;
-                LOG(ERROR) << "AsyncReader Read failed for request " << request_id << ": " << result.status().message();
-                bool previous = is_success->exchange(false);
-                if (previous) {
-                    common::backend_api::Response r(request_id, common::ResponseCode::FileAccessError);
-                    responder->push(std::move(r));
+        try {
+            // std::cerr << "DEBUG: Calling reader.Read(token) for request " << request_id << std::endl;
+            auto read_future = reader.Read(std::move(token));
+            
+            read_future.then([reader = std::move(reader), buffer, remaining, request_id, responder, counter, is_success](auto f) mutable {
+                // std::cerr << "DEBUG: AsyncReader callback invoked for request " << request_id << std::endl;
+                google::cloud::StatusOr<std::pair<google::cloud::storage_experimental::ReadPayload, google::cloud::storage_experimental::AsyncToken>> result;
+                try {
+                     result = f.get();
+                } catch (const std::exception& e) {
+                     std::cerr << "DEBUG ERROR: Exception in f.get(): " << e.what() << std::endl;
+                     LOG(ERROR) << "Exception in f.get(): " << e.what();
+                     result = google::cloud::Status(google::cloud::StatusCode::kUnknown, e.what());
+                } catch (...) {
+                     std::cerr << "DEBUG ERROR: Unknown exception in f.get()" << std::endl;
+                     LOG(ERROR) << "Unknown exception in f.get()";
+                     result = google::cloud::Status(google::cloud::StatusCode::kUnknown, "Unknown exception");
                 }
-                return;
-            }
 
-            auto& pair = *result;
-            auto& payload = pair.first;
-            auto& new_token = pair.second;
-
-            std::cerr << "DEBUG: AsyncReader payload received for request " << request_id << ", chunks=" << payload.contents().size() << std::endl;
-
-            size_t bytes_read = 0;
-            for (const auto& chunk : payload.contents()) {
-                if (bytes_read + chunk.size() > remaining) {
-                    std::cerr << "DEBUG ERROR: AsyncReader received more data than requested for request " << request_id << std::endl;
-                    LOG(ERROR) << "AsyncReader received more data than requested for request " << request_id;
+                if (!result) {
+                    std::cerr << "DEBUG ERROR: AsyncReader Read failed for request " << request_id << ": " << result.status().message() << std::endl;
+                    LOG(ERROR) << "AsyncReader Read failed for request " << request_id << ": " << result.status().message();
                     bool previous = is_success->exchange(false);
                     if (previous) {
                         common::backend_api::Response r(request_id, common::ResponseCode::FileAccessError);
@@ -149,34 +146,70 @@ namespace {
                     }
                     return;
                 }
-                std::memcpy(buffer + bytes_read, chunk.data(), chunk.size());
-                bytes_read += chunk.size();
-            }
 
-            if (new_token.valid()) {
-                std::cerr << "DEBUG: AsyncReader partial read for request " << request_id << ". Recursing." << std::endl;
-                read_loop(std::move(reader), std::move(new_token), buffer + bytes_read, remaining - bytes_read, request_id, responder, counter, is_success);
-            } else {
-                 if (remaining != bytes_read) {
-                     std::cerr << "DEBUG ERROR: AsyncReader stream finished but incomplete for request " << request_id << ". Expected " << remaining << ", got " << bytes_read << std::endl;
-                     LOG(ERROR) << "AsyncReader stream finished but incomplete for request " << request_id << ". Expected " << remaining << ", got " << bytes_read;
-                     bool previous = is_success->exchange(false);
-                     if (previous) {
-                         common::backend_api::Response r(request_id, common::ResponseCode::FileAccessError);
+                auto& pair = *result;
+                auto& payload = pair.first;
+                auto& new_token = pair.second;
+
+                // std::cerr << "DEBUG: AsyncReader payload received for request " << request_id << ", chunks=" << payload.contents().size() << std::endl;
+
+                size_t bytes_read = 0;
+                for (const auto& chunk : payload.contents()) {
+                    if (bytes_read + chunk.size() > remaining) {
+                        std::cerr << "DEBUG ERROR: AsyncReader received more data than requested for request " << request_id << std::endl;
+                        LOG(ERROR) << "AsyncReader received more data than requested for request " << request_id;
+                        bool previous = is_success->exchange(false);
+                        if (previous) {
+                            common::backend_api::Response r(request_id, common::ResponseCode::FileAccessError);
+                            responder->push(std::move(r));
+                        }
+                        return;
+                    }
+                    std::memcpy(buffer + bytes_read, chunk.data(), chunk.size());
+                    bytes_read += chunk.size();
+                }
+
+                if (new_token.valid()) {
+                    // std::cerr << "DEBUG: AsyncReader partial read for request " << request_id << ". Recursing." << std::endl;
+                    read_loop(std::move(reader), std::move(new_token), buffer + bytes_read, remaining - bytes_read, request_id, responder, counter, is_success);
+                } else {
+                     if (remaining != bytes_read) {
+                         std::cerr << "DEBUG ERROR: AsyncReader stream finished but incomplete for request " << request_id << ". Expected " << remaining << ", got " << bytes_read << std::endl;
+                         LOG(ERROR) << "AsyncReader stream finished but incomplete for request " << request_id << ". Expected " << remaining << ", got " << bytes_read;
+                         bool previous = is_success->exchange(false);
+                         if (previous) {
+                             common::backend_api::Response r(request_id, common::ResponseCode::FileAccessError);
+                             responder->push(std::move(r));
+                         }
+                         return;
+                     }
+
+                     const auto running = counter->fetch_sub(1);
+                     LOG(SPAM) << "Async read request " << request_id << " chunk succeeded - " << running << " running";
+                     if (running == 1) {
+                         // std::cerr << "DEBUG: Request " << request_id << " completely finished successfully. Pushing response." << std::endl;
+                         common::backend_api::Response r(request_id, common::ResponseCode::Success);
                          responder->push(std::move(r));
                      }
-                     return;
-                 }
-
-                 const auto running = counter->fetch_sub(1);
-                 LOG(SPAM) << "Async read request " << request_id << " chunk succeeded - " << running << " running";
-                 if (running == 1) {
-                     std::cerr << "DEBUG: Request " << request_id << " completely finished successfully. Pushing response." << std::endl;
-                     common::backend_api::Response r(request_id, common::ResponseCode::Success);
-                     responder->push(std::move(r));
-                 }
+                }
+            });
+        } catch (const std::exception& e) {
+            std::cerr << "DEBUG ERROR: Exception in read_loop: " << e.what() << std::endl;
+            LOG(ERROR) << "Exception in read_loop: " << e.what();
+            bool previous = is_success->exchange(false);
+            if (previous) {
+                 common::backend_api::Response r(request_id, common::ResponseCode::FileAccessError);
+                 responder->push(std::move(r));
             }
-        });
+        } catch (...) {
+            std::cerr << "DEBUG ERROR: Unknown exception in read_loop" << std::endl;
+            LOG(ERROR) << "Unknown exception in read_loop";
+            bool previous = is_success->exchange(false);
+            if (previous) {
+                 common::backend_api::Response r(request_id, common::ResponseCode::FileAccessError);
+                 responder->push(std::move(r));
+            }
+        }
     }
 }
 
@@ -211,6 +244,7 @@ common::ResponseCode GCSClient::async_read(const char* path, common::backend_api
 
         std::cerr << "DEBUG: Calling _new_async_client->Open..." << std::endl;
         auto fut = _new_async_client->Open(google::cloud::storage_experimental::BucketName(bucket_name), path_name);
+        std::cerr << "DEBUG: Open future valid: " << fut.valid() << std::endl;
 
         fut.then([dest_buffer = buffer_, responder = _responder, request_id, size, total_, offset_, chunk_bytesize = _chunk_bytesize, counter, is_success](auto f) {
             std::cerr << "DEBUG: _new_async_client->Open callback invoked for request " << request_id << std::endl;

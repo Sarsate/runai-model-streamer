@@ -31,6 +31,7 @@ namespace runai::llm::streamer::impl::gcs
 struct GCSClient : common::IClient
 {
     GCSClient(const common::backend_api::ObjectClientConfig_t& config);
+    ~GCSClient();
 
      // verify that client's credentials have not changed
     bool verify_credentials(const common::backend_api::ObjectClientConfig_t & config) const;
