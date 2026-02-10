@@ -165,7 +165,7 @@ namespace {
 
 common::ResponseCode GCSClient::async_read(const char* path, common::backend_api::ObjectRange_t range, char* destination_buffer, common::backend_api::ObjectRequestId_t request_id)
 {
-    std::cerr << "DEBUG: async_read called for request_id " << request_id << " path=" << path << std::endl;
+    // std::cerr << "DEBUG: async_read called for request_id " << request_id << " path=" << path << std::endl;
     if (_responder == nullptr)
     {
         _responder = std::make_shared<Responder>(1);
@@ -176,7 +176,7 @@ common::ResponseCode GCSClient::async_read(const char* path, common::backend_api
     }
 
     if (_client_config.use_new_async_client) {
-        std::cerr << "DEBUG: async_read using NEW AsyncClient" << std::endl;
+        // std::cerr << "DEBUG: async_read using NEW AsyncClient" << std::endl;
         
         size_t size = std::max(1UL, range.length/_chunk_bytesize);
         auto pending_chunks = std::make_shared<std::atomic<unsigned>>(size);
@@ -214,7 +214,7 @@ common::ResponseCode GCSClient::async_read(const char* path, common::backend_api
         if (it != _descriptors.end()) {
             auto descriptor = it->second;
             lock.unlock();
-            std::cerr << "DEBUG: Cache hit for descriptor: " << key << std::endl;
+            // std::cerr << "DEBUG: Cache hit for descriptor: " << key << std::endl;
             trigger_reads(descriptor);
             return _stop ? common::ResponseCode::FinishedError : common::ResponseCode::Success;
         }
@@ -238,7 +238,7 @@ common::ResponseCode GCSClient::async_read(const char* path, common::backend_api
 
         if (!is_first_request) {
             // An Open is already in progress. This request is now queued.
-            std::cerr << "DEBUG: Coalescing open request for: " << key << " (queue size: " << pending.size() << ")" << std::endl;
+            // std::cerr << "DEBUG: Coalescing open request for: " << key << " (queue size: " << pending.size() << ")" << std::endl;
             return _stop ? common::ResponseCode::FinishedError : common::ResponseCode::Success;
         }
 
@@ -287,7 +287,7 @@ common::ResponseCode GCSClient::async_read(const char* path, common::backend_api
     char * buffer_ = destination_buffer;
     // split range into chunks
     size_t size = std::max(1UL, range.length/_chunk_bytesize);
-    std::cerr << "DEBUG SPAM: Number of chunks is: " << size << std::endl;
+    // std::cerr << "DEBUG SPAM: Number of chunks is: " << size << std::endl;
 
     // each range is divided into chunks (size is the number of chunks)
     // when all the chunks have been read successfuly the response for that range is pushed to the responder
@@ -315,7 +315,7 @@ common::ResponseCode GCSClient::async_read(const char* path, common::backend_api
             if (response_code == common::ResponseCode::Success)
             {
                 const auto running = counter->fetch_sub(1);
-                std::cerr << "DEBUG SPAM: Async read request " << request_id << " succeeded - " << running << " running" << std::endl;
+                // std::cerr << "DEBUG SPAM: Async read request " << request_id << " succeeded - " << running << " running" << std::endl;
                 // send success response only if all the requests have succeeded
                 // note that unsuccessful attempts do not update the counter
                 if (running == 1)
