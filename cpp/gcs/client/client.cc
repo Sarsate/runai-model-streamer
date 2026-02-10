@@ -56,7 +56,7 @@ common::backend_api::Response GCSClient::async_read_response()
 {
     if (_responder == nullptr)
     {
-        LOG(WARNING) << "Requesting response with uninitialized responder";
+        std::cerr << "DEBUG WARNING: Requesting response with uninitialized responder" << std::endl;
         return common::ResponseCode::FinishedError;
     }
 
@@ -86,15 +86,12 @@ common::ResponseCode write_stream_to_buffer(
     if (bytes_received != bytesize) {
         std::cerr << "DEBUG ERROR: GCS ReadObject request " << request_id 
                   << " failed. Received " << bytes_received << " bytes, expected " << bytesize << "." << std::endl;
-        LOG(ERROR) << "GCS ReadObject received " << bytes_received << " bytes, but "
-                << bytesize << " were requested. This is unexpected." << std::endl;
         return common::ResponseCode::FileAccessError;
     }
     if (stream.bad()) {
         const auto & err = stream.status();
         std::cerr << "DEBUG ERROR: GCS stream bad for request " << request_id 
                   << ". Code: " << err.code() << ", Message: " << err.message() << std::endl;
-        LOG(ERROR) << "Failed to download GCS object of request " << request_id << " " << err.code() << ": " << err.message();
         return common::ResponseCode::FileAccessError;
     }
 
@@ -115,30 +112,27 @@ namespace {
                    std::shared_ptr<std::atomic<unsigned>> counter,
                    std::shared_ptr<std::atomic<bool>> is_success) {
         
-        // std::cerr << "DEBUG: read_loop entered for request " << request_id << " remaining=" << remaining << std::endl; // Too spammy for recursive calls
+        std::cerr << "DEBUG: read_loop entered for request " << request_id << " remaining=" << remaining << std::endl;
 
         try {
-            // std::cerr << "DEBUG: Calling reader.Read(token) for request " << request_id << std::endl;
+            std::cerr << "DEBUG: Calling reader.Read(token) for request " << request_id << std::endl;
             auto read_future = reader.Read(std::move(token));
             
             read_future.then([reader = std::move(reader), buffer, remaining, request_id, responder, counter, is_success](auto f) mutable {
-                // std::cerr << "DEBUG: AsyncReader callback invoked for request " << request_id << std::endl;
+                std::cerr << "DEBUG: AsyncReader callback invoked for request " << request_id << std::endl;
                 google::cloud::StatusOr<std::pair<google::cloud::storage_experimental::ReadPayload, google::cloud::storage_experimental::AsyncToken>> result;
                 try {
                      result = f.get();
                 } catch (const std::exception& e) {
                      std::cerr << "DEBUG ERROR: Exception in f.get(): " << e.what() << std::endl;
-                     LOG(ERROR) << "Exception in f.get(): " << e.what();
                      result = google::cloud::Status(google::cloud::StatusCode::kUnknown, e.what());
                 } catch (...) {
                      std::cerr << "DEBUG ERROR: Unknown exception in f.get()" << std::endl;
-                     LOG(ERROR) << "Unknown exception in f.get()";
                      result = google::cloud::Status(google::cloud::StatusCode::kUnknown, "Unknown exception");
                 }
 
                 if (!result) {
                     std::cerr << "DEBUG ERROR: AsyncReader Read failed for request " << request_id << ": " << result.status().message() << std::endl;
-                    LOG(ERROR) << "AsyncReader Read failed for request " << request_id << ": " << result.status().message();
                     bool previous = is_success->exchange(false);
                     if (previous) {
                         common::backend_api::Response r(request_id, common::ResponseCode::FileAccessError);
@@ -151,13 +145,12 @@ namespace {
                 auto& payload = pair.first;
                 auto& new_token = pair.second;
 
-                // std::cerr << "DEBUG: AsyncReader payload received for request " << request_id << ", chunks=" << payload.contents().size() << std::endl;
+                std::cerr << "DEBUG: AsyncReader payload received for request " << request_id << ", chunks=" << payload.contents().size() << std::endl;
 
                 size_t bytes_read = 0;
                 for (const auto& chunk : payload.contents()) {
                     if (bytes_read + chunk.size() > remaining) {
                         std::cerr << "DEBUG ERROR: AsyncReader received more data than requested for request " << request_id << std::endl;
-                        LOG(ERROR) << "AsyncReader received more data than requested for request " << request_id;
                         bool previous = is_success->exchange(false);
                         if (previous) {
                             common::backend_api::Response r(request_id, common::ResponseCode::FileAccessError);
@@ -170,12 +163,11 @@ namespace {
                 }
 
                 if (new_token.valid()) {
-                    // std::cerr << "DEBUG: AsyncReader partial read for request " << request_id << ". Recursing." << std::endl;
+                    std::cerr << "DEBUG: AsyncReader partial read for request " << request_id << ". Recursing." << std::endl;
                     read_loop(std::move(reader), std::move(new_token), buffer + bytes_read, remaining - bytes_read, request_id, responder, counter, is_success);
                 } else {
                      if (remaining != bytes_read) {
                          std::cerr << "DEBUG ERROR: AsyncReader stream finished but incomplete for request " << request_id << ". Expected " << remaining << ", got " << bytes_read << std::endl;
-                         LOG(ERROR) << "AsyncReader stream finished but incomplete for request " << request_id << ". Expected " << remaining << ", got " << bytes_read;
                          bool previous = is_success->exchange(false);
                          if (previous) {
                              common::backend_api::Response r(request_id, common::ResponseCode::FileAccessError);
@@ -185,9 +177,9 @@ namespace {
                      }
 
                      const auto running = counter->fetch_sub(1);
-                     LOG(SPAM) << "Async read request " << request_id << " chunk succeeded - " << running << " running";
+                     std::cerr << "DEBUG SPAM: Async read request " << request_id << " chunk succeeded - " << running << " running" << std::endl;
                      if (running == 1) {
-                         // std::cerr << "DEBUG: Request " << request_id << " completely finished successfully. Pushing response." << std::endl;
+                         std::cerr << "DEBUG: Request " << request_id << " completely finished successfully. Pushing response." << std::endl;
                          common::backend_api::Response r(request_id, common::ResponseCode::Success);
                          responder->push(std::move(r));
                      }
@@ -195,7 +187,6 @@ namespace {
             });
         } catch (const std::exception& e) {
             std::cerr << "DEBUG ERROR: Exception in read_loop: " << e.what() << std::endl;
-            LOG(ERROR) << "Exception in read_loop: " << e.what();
             bool previous = is_success->exchange(false);
             if (previous) {
                  common::backend_api::Response r(request_id, common::ResponseCode::FileAccessError);
@@ -203,7 +194,6 @@ namespace {
             }
         } catch (...) {
             std::cerr << "DEBUG ERROR: Unknown exception in read_loop" << std::endl;
-            LOG(ERROR) << "Unknown exception in read_loop";
             bool previous = is_success->exchange(false);
             if (previous) {
                  common::backend_api::Response r(request_id, common::ResponseCode::FileAccessError);
@@ -229,7 +219,7 @@ common::ResponseCode GCSClient::async_read(const char* path, common::backend_api
         std::cerr << "DEBUG: async_read using NEW AsyncClient" << std::endl;
         char * buffer_ = destination_buffer;
         size_t size = std::max(1UL, range.length/_chunk_bytesize);
-        LOG(SPAM) << "Number of chunks is: " << size;
+        std::cerr << "DEBUG SPAM: Number of chunks is: " << size << std::endl;
 
         auto counter = std::make_shared< std::atomic<unsigned> >(size);
         auto is_success = std::make_shared< std::atomic<bool> >(true);
@@ -251,7 +241,6 @@ common::ResponseCode GCSClient::async_read(const char* path, common::backend_api
             auto result = f.get();
             if (!result) {
                 std::cerr << "DEBUG ERROR: Failed to open object descriptor for request " << request_id << ": " << result.status().message() << std::endl;
-                LOG(ERROR) << "Failed to open object descriptor for request " << request_id << ": " << result.status().message();
                 bool previous = is_success->exchange(false);
                 if (previous) {
                     common::backend_api::Response r(request_id, common::ResponseCode::FileAccessError);
@@ -288,7 +277,7 @@ common::ResponseCode GCSClient::async_read(const char* path, common::backend_api
     char * buffer_ = destination_buffer;
     // split range into chunks
     size_t size = std::max(1UL, range.length/_chunk_bytesize);
-    LOG(SPAM) << "Number of chunks is: " << size;
+    std::cerr << "DEBUG SPAM: Number of chunks is: " << size << std::endl;
 
     // each range is divided into chunks (size is the number of chunks)
     // when all the chunks have been read successfuly the response for that range is pushed to the responder
@@ -316,7 +305,7 @@ common::ResponseCode GCSClient::async_read(const char* path, common::backend_api
             if (response_code == common::ResponseCode::Success)
             {
                 const auto running = counter->fetch_sub(1);
-                LOG(SPAM) << "Async read request " << request_id << " succeeded - " << running << " running";
+                std::cerr << "DEBUG SPAM: Async read request " << request_id << " succeeded - " << running << " running" << std::endl;
                 // send success response only if all the requests have succeeded
                 // note that unsuccessful attempts do not update the counter
                 if (running == 1)
