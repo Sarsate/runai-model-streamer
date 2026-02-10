@@ -1,6 +1,7 @@
 #include <regex>
 #include <vector>
 #include <chrono>
+#include <iostream>
 
 #include "common/s3_wrapper/s3_wrapper.h"
 #include "common/s3_credentials/s3_credentials.h"
@@ -235,6 +236,7 @@ void * S3ClientWrapper::create_client(const Params & params)
 
 ResponseCode S3ClientWrapper::async_read(const Params & params, common::backend_api::ObjectRequestId_t request_id, const Range & range, char * buffer)
 {
+    std::cerr << "DEBUG: S3ClientWrapper::async_read called for request " << request_id << std::endl;
     auto s3_async_read_ = _backend_handle->dylib_ptr->dlsym<ResponseCode(*)(common::backend_api::ObjectClientHandle_t, const char*, common::backend_api::ObjectRange_t, char*, common::backend_api::ObjectRequestId_t)>("obj_request_read");
     return s3_async_read_(_s3_client, params.uri->uri.c_str(), range.to_backend_api_range(), buffer, request_id);
     return common::ResponseCode::Success;

@@ -107,10 +107,12 @@ common::backend_api::ResponseCode_t obj_request_read(common::backend_api::Object
                                                      char* destination_buffer,
                                                      common::backend_api::ObjectRequestId_t request_id)
 {
+    std::cerr << "DEBUG: obj_request_read called for request " << request_id << std::endl;
     try
     {
         if (!client_handle)
         {
+            std::cerr << "DEBUG ERROR: obj_request_read called with null client_handle" << std::endl;
             LOG(ERROR) << "Attempt to read with null gcs client";
             return common::ResponseCode::UnknownError;
         }
@@ -119,6 +121,7 @@ common::backend_api::ResponseCode_t obj_request_read(common::backend_api::Object
     }
     catch(const std::exception& e)
     {
+        std::cerr << "DEBUG ERROR: obj_request_read caught exception: " << e.what() << std::endl;
         LOG(ERROR) << "Caught exception while sending async request";
     }
     return common::ResponseCode::UnknownError;

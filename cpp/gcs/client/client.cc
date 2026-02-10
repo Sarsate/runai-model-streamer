@@ -111,7 +111,14 @@ namespace {
                    std::shared_ptr<std::atomic<unsigned>> counter,
                    std::shared_ptr<std::atomic<bool>> is_success) {
         
-        reader.Read(std::move(token)).then([reader = std::move(reader), buffer, remaining, request_id, responder, counter, is_success](auto f) mutable {
+        std::cerr << "DEBUG: read_loop entered for request " << request_id << " remaining=" << remaining << std::endl;
+
+        std::cerr << "DEBUG: Calling reader.Read(token) for request " << request_id << std::endl;
+        auto read_future = reader.Read(std::move(token));
+        std::cerr << "DEBUG: reader.Read(token) returned future (valid=" << read_future.valid() << "). Attaching .then callback..." << std::endl;
+        
+        read_future.then([reader = std::move(reader), buffer, remaining, request_id, responder, counter, is_success](auto f) mutable {
+            std::cerr << "DEBUG: AsyncReader callback invoked for request " << request_id << std::endl;
             auto result = f.get();
             if (!result) {
                 std::cerr << "DEBUG ERROR: AsyncReader Read failed for request " << request_id << ": " << result.status().message() << std::endl;
@@ -127,6 +134,8 @@ namespace {
             auto& pair = *result;
             auto& payload = pair.first;
             auto& new_token = pair.second;
+
+            std::cerr << "DEBUG: AsyncReader payload received for request " << request_id << ", chunks=" << payload.contents().size() << std::endl;
 
             size_t bytes_read = 0;
             for (const auto& chunk : payload.contents()) {
@@ -145,6 +154,7 @@ namespace {
             }
 
             if (new_token.valid()) {
+                std::cerr << "DEBUG: AsyncReader partial read for request " << request_id << ". Recursing." << std::endl;
                 read_loop(std::move(reader), std::move(new_token), buffer + bytes_read, remaining - bytes_read, request_id, responder, counter, is_success);
             } else {
                  if (remaining != bytes_read) {
@@ -161,6 +171,7 @@ namespace {
                  const auto running = counter->fetch_sub(1);
                  LOG(SPAM) << "Async read request " << request_id << " chunk succeeded - " << running << " running";
                  if (running == 1) {
+                     std::cerr << "DEBUG: Request " << request_id << " completely finished successfully. Pushing response." << std::endl;
                      common::backend_api::Response r(request_id, common::ResponseCode::Success);
                      responder->push(std::move(r));
                  }
@@ -171,6 +182,7 @@ namespace {
 
 common::ResponseCode GCSClient::async_read(const char* path, common::backend_api::ObjectRange_t range, char* destination_buffer, common::backend_api::ObjectRequestId_t request_id)
 {
+    std::cerr << "DEBUG: async_read called for request_id " << request_id << " path=" << path << std::endl;
     if (_responder == nullptr)
     {
         _responder = std::make_shared<Responder>(1);
@@ -181,6 +193,7 @@ common::ResponseCode GCSClient::async_read(const char* path, common::backend_api
     }
 
     if (_client_config.use_new_async_client) {
+        std::cerr << "DEBUG: async_read using NEW AsyncClient" << std::endl;
         char * buffer_ = destination_buffer;
         size_t size = std::max(1UL, range.length/_chunk_bytesize);
         LOG(SPAM) << "Number of chunks is: " << size;
@@ -191,13 +204,16 @@ common::ResponseCode GCSClient::async_read(const char* path, common::backend_api
         const auto uri = common::s3::StorageUri(path);
         std::string bucket_name(uri.bucket);
         std::string path_name(uri.path);
+        std::cerr << "DEBUG: Parsed URI - Bucket: " << bucket_name << ", Path: " << path_name << std::endl;
 
         size_t total_ = range.length;
         size_t offset_ = range.offset;
 
+        std::cerr << "DEBUG: Calling _new_async_client->Open..." << std::endl;
         auto fut = _new_async_client->Open(google::cloud::storage_experimental::BucketName(bucket_name), path_name);
 
         fut.then([dest_buffer = buffer_, responder = _responder, request_id, size, total_, offset_, chunk_bytesize = _chunk_bytesize, counter, is_success](auto f) {
+            std::cerr << "DEBUG: _new_async_client->Open callback invoked for request " << request_id << std::endl;
             auto result = f.get();
             if (!result) {
                 std::cerr << "DEBUG ERROR: Failed to open object descriptor for request " << request_id << ": " << result.status().message() << std::endl;
@@ -210,6 +226,7 @@ common::ResponseCode GCSClient::async_read(const char* path, common::backend_api
                 return;
             }
 
+            std::cerr << "DEBUG: _new_async_client->Open success for request " << request_id << ". Starting reads." << std::endl;
             auto descriptor = *std::move(result);
             size_t current_offset = offset_;
             size_t current_total = total_;
@@ -218,15 +235,19 @@ common::ResponseCode GCSClient::async_read(const char* path, common::backend_api
             for (unsigned i = 0; i < size; ++i) {
                  size_t bytesize = (i == size - 1 ? current_total : chunk_bytesize);
                  
+                 std::cerr << "DEBUG: Triggering Read for request " << request_id << " offset=" << current_offset << " size=" << bytesize << std::endl;
                  auto read_result = descriptor.Read(current_offset, bytesize);
                  read_loop(std::move(read_result.first), std::move(read_result.second), current_buffer, bytesize, request_id, responder, counter, is_success);
+                 std::cerr << "DEBUG: read_loop call returned for request " << request_id << std::endl;
                  
                  current_total -= bytesize;
                  current_offset += bytesize;
                  current_buffer += bytesize;
             }
+            std::cerr << "DEBUG: _new_async_client->Open callback FINISHED for request " << request_id << std::endl;
         });
 
+        std::cerr << "DEBUG: async_read (new client) returning success (async task scheduled)" << std::endl;
         return _stop ? common::ResponseCode::FinishedError : common::ResponseCode::Success;
     }
 

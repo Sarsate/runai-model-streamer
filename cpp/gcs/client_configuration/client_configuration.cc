@@ -69,6 +69,7 @@ ClientConfiguration::ClientConfiguration()
         options.set<google::cloud::storage::DownloadStallMinimumRateOption>(low_speed_limit);
     }
 
+    /*
     const auto trace_gcs = utils::getenv<bool>("RUNAI_STREAMER_S3_TRACE", false);
     if (trace_gcs)
     {
@@ -80,6 +81,7 @@ ClientConfiguration::ClientConfiguration()
 
         options.set<google::cloud::LoggingComponentsOption>(std::move(logging_components));
     }
+    */
 
     const auto sa_key_file_name = utils::getenv<std::string>("RUNAI_STREAMER_GCS_CREDENTIAL_FILE", "");
     if (!sa_key_file_name.empty()) {

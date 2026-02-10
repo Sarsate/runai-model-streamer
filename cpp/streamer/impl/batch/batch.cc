@@ -6,6 +6,7 @@
 #include <set>
 #include <map>
 #include <vector>
+#include <iostream>
 
 #include "utils/logging/logging.h"
 
@@ -153,6 +154,7 @@ void Batch::read(const Config & config, std::atomic<bool> & stopped)
 
 void Batch::request_async_read(Reader * reader, std::atomic<bool> & stopped)
 {
+    std::cerr << "DEBUG: Batch::request_async_read called for " << tasks.size() << " tasks" << std::endl;
     if (stopped)
     {
         throw common::Exception(common::ResponseCode::FinishedError);
@@ -165,13 +167,16 @@ void Batch::request_async_read(Reader * reader, std::atomic<bool> & stopped)
     {
         auto dst = task.destination();
         common::Range range(task.info.offset, task.info.bytesize);
+        std::cerr << "DEBUG: Processing task " << task.info.global_id << " size=" << range.size << std::endl;
         if (range.size == 0)
         {
             // tensors of size zero are valid, but empty request can be invalid in the storage backend
             LOG(DEBUG) << "Found task of zero size - return response and don't pass to backend";
+            std::cerr << "DEBUG: Task size 0, skipping async read" << std::endl;
             handle_task_response(common::ResponseCode::Success, &task);
             continue;
         }
+        std::cerr << "DEBUG: Calling reader->async_read for task " << task.info.global_id << std::endl;
         reader->async_read(object_storage_params, task.info.global_id, range, dst);
     }
 }
