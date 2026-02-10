@@ -65,19 +65,31 @@ common::ResponseCode write_stream_to_buffer(
         size_t bytesize,
         common::backend_api::ObjectRequestId_t request_id) {
     size_t bytes_received = 0;
-    while (stream.read(dest_buffer, bytesize)) {
-        bytes_received += stream.gcount();
+    char* ptr = dest_buffer;
+    size_t remaining = bytesize;
+
+    // Robust read loop
+    while (remaining > 0 && stream) {
+        stream.read(ptr, remaining);
+        std::streamsize count = stream.gcount();
+        bytes_received += count;
+        ptr += count;
+        remaining -= count;
     }
+    
     stream.Close();
+
     if (bytes_received != bytesize) {
+        std::cerr << "DEBUG ERROR: GCS ReadObject request " << request_id 
+                  << " failed. Received " << bytes_received << " bytes, expected " << bytesize << "." << std::endl;
         LOG(ERROR) << "GCS ReadObject received " << bytes_received << " bytes, but "
                 << bytesize << " were requested. This is unexpected." << std::endl;
         return common::ResponseCode::FileAccessError;
     }
     if (stream.bad()) {
-        // Note: currently a failure to read any sub range fails the entire read request
-        //       a retry mechanism should be added for failed reads
         const auto & err = stream.status();
+        std::cerr << "DEBUG ERROR: GCS stream bad for request " << request_id 
+                  << ". Code: " << err.code() << ", Message: " << err.message() << std::endl;
         LOG(ERROR) << "Failed to download GCS object of request " << request_id << " " << err.code() << ": " << err.message();
         return common::ResponseCode::FileAccessError;
     }
@@ -98,6 +110,7 @@ namespace {
         reader.Read(std::move(token)).then([reader = std::move(reader), buffer, remaining, request_id, responder, counter, is_success](auto f) mutable {
             auto result = f.get();
             if (!result) {
+                std::cerr << "DEBUG ERROR: AsyncReader Read failed for request " << request_id << ": " << result.status().message() << std::endl;
                 LOG(ERROR) << "AsyncReader Read failed for request " << request_id << ": " << result.status().message();
                 bool previous = is_success->exchange(false);
                 if (previous) {
@@ -114,6 +127,7 @@ namespace {
             size_t bytes_read = 0;
             for (const auto& chunk : payload.contents()) {
                 if (bytes_read + chunk.size() > remaining) {
+                    std::cerr << "DEBUG ERROR: AsyncReader received more data than requested for request " << request_id << std::endl;
                     LOG(ERROR) << "AsyncReader received more data than requested for request " << request_id;
                     bool previous = is_success->exchange(false);
                     if (previous) {
@@ -130,6 +144,7 @@ namespace {
                 read_loop(std::move(reader), std::move(new_token), buffer + bytes_read, remaining - bytes_read, request_id, responder, counter, is_success);
             } else {
                  if (remaining != bytes_read) {
+                     std::cerr << "DEBUG ERROR: AsyncReader stream finished but incomplete for request " << request_id << ". Expected " << remaining << ", got " << bytes_read << std::endl;
                      LOG(ERROR) << "AsyncReader stream finished but incomplete for request " << request_id << ". Expected " << remaining << ", got " << bytes_read;
                      bool previous = is_success->exchange(false);
                      if (previous) {
@@ -181,6 +196,7 @@ common::ResponseCode GCSClient::async_read(const char* path, common::backend_api
         fut.then([dest_buffer = buffer_, responder = _responder, request_id, size, total_, offset_, chunk_bytesize = _chunk_bytesize, counter, is_success](auto f) {
             auto result = f.get();
             if (!result) {
+                std::cerr << "DEBUG ERROR: Failed to open object descriptor for request " << request_id << ": " << result.status().message() << std::endl;
                 LOG(ERROR) << "Failed to open object descriptor for request " << request_id << ": " << result.status().message();
                 bool previous = is_success->exchange(false);
                 if (previous) {
