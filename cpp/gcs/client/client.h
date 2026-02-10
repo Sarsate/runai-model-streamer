@@ -54,6 +54,9 @@ struct GCSClient : common::IClient
     // queue of asynchronous responses
     using Responder = common::SharedQueue<common::backend_api::Response>;
     std::shared_ptr<Responder> _responder;
+
+    std::mutex _descriptors_mutex;
+    std::map<std::string, std::shared_ptr<google::cloud::storage_experimental::AsyncObjectDescriptor>> _descriptors;
 };
 
 }; //namespace runai::llm::streamer::impl::gcs

@@ -113,20 +113,43 @@ namespace {
                    std::shared_ptr<std::atomic<unsigned>> counter,
                    std::shared_ptr<std::atomic<bool>> is_success) {
         
-        std::cerr << "DEBUG: read_loop (SYNC) entered for request " << request_id << " remaining=" << remaining << std::endl;
+        std::cerr << "DEBUG: read_loop entered for request " << request_id << " remaining=" << remaining << std::endl;
 
-        while (true) {
+        auto read_future = reader.Read(std::move(token));
+        
+        read_future.then([reader = std::move(reader), buffer, remaining, request_id, responder, counter, is_success](auto f) mutable {
+            std::cerr << "DEBUG: AsyncReader callback invoked for request " << request_id << std::endl;
+            google::cloud::StatusOr<std::pair<google::cloud::storage_experimental::ReadPayload, google::cloud::storage_experimental::AsyncToken>> result;
             try {
-                std::cerr << "DEBUG: Calling reader.Read(token)..." << std::endl;
-                auto read_future = reader.Read(std::move(token));
-                std::cerr << "DEBUG: Waiting for reader.Read future.get()..." << std::endl;
-                
-                // BLOCKING CALL inside detached thread
-                auto result = read_future.get();
-                std::cerr << "DEBUG: reader.Read returned." << std::endl;
+                    result = f.get();
+            } catch (const std::exception& e) {
+                    std::cerr << "DEBUG ERROR: Exception in f.get(): " << e.what() << std::endl;
+                    result = google::cloud::Status(google::cloud::StatusCode::kUnknown, e.what());
+            } catch (...) {
+                    std::cerr << "DEBUG ERROR: Unknown exception in f.get()" << std::endl;
+                    result = google::cloud::Status(google::cloud::StatusCode::kUnknown, "Unknown exception");
+            }
 
-                if (!result) {
-                    std::cerr << "DEBUG ERROR: AsyncReader Read failed for request " << request_id << ": " << result.status().message() << std::endl;
+            if (!result) {
+                std::cerr << "DEBUG ERROR: AsyncReader Read failed for request " << request_id << ": " << result.status().message() << std::endl;
+                bool previous = is_success->exchange(false);
+                if (previous) {
+                    common::backend_api::Response r(request_id, common::ResponseCode::FileAccessError);
+                    responder->push(std::move(r));
+                }
+                return;
+            }
+
+            auto& pair = *result;
+            auto& payload = pair.first;
+            auto& new_token = pair.second;
+
+            std::cerr << "DEBUG: AsyncReader payload received for request " << request_id << ", chunks=" << payload.contents().size() << std::endl;
+
+            size_t bytes_read = 0;
+            for (const auto& chunk : payload.contents()) {
+                if (bytes_read + chunk.size() > remaining) {
+                    std::cerr << "DEBUG ERROR: AsyncReader received more data than requested for request " << request_id << std::endl;
                     bool previous = is_success->exchange(false);
                     if (previous) {
                         common::backend_api::Response r(request_id, common::ResponseCode::FileAccessError);
@@ -134,18 +157,16 @@ namespace {
                     }
                     return;
                 }
+                std::memcpy(buffer + bytes_read, chunk.data(), chunk.size());
+                bytes_read += chunk.size();
+            }
 
-                auto& pair = *result;
-                auto& payload = pair.first;
-                // Update token for next iteration
-                token = std::move(pair.second);
-
-                std::cerr << "DEBUG: AsyncReader payload received for request " << request_id << ", chunks=" << payload.contents().size() << std::endl;
-
-                size_t bytes_read = 0;
-                for (const auto& chunk : payload.contents()) {
-                    if (bytes_read + chunk.size() > remaining) {
-                        std::cerr << "DEBUG ERROR: AsyncReader received more data than requested for request " << request_id << std::endl;
+            if (new_token.valid()) {
+                std::cerr << "DEBUG: AsyncReader partial read for request " << request_id << ". Recursing." << std::endl;
+                read_loop(std::move(reader), std::move(new_token), buffer + bytes_read, remaining - bytes_read, request_id, responder, counter, is_success);
+            } else {
+                    if (remaining != bytes_read) {
+                        std::cerr << "DEBUG ERROR: AsyncReader stream finished but incomplete for request " << request_id << ". Expected " << remaining << ", got " << bytes_read << std::endl;
                         bool previous = is_success->exchange(false);
                         if (previous) {
                             common::backend_api::Response r(request_id, common::ResponseCode::FileAccessError);
@@ -153,56 +174,16 @@ namespace {
                         }
                         return;
                     }
-                    std::memcpy(buffer + bytes_read, chunk.data(), chunk.size());
-                    bytes_read += chunk.size();
-                }
-                
-                // Advance buffer and decrement remaining for next iteration (if any)
-                buffer += bytes_read;
-                remaining -= bytes_read;
 
-                if (token.valid()) {
-                    std::cerr << "DEBUG: AsyncReader partial read for request " << request_id << ". Looping." << std::endl;
-                    continue;
-                } else {
-                     if (remaining != 0) {
-                         std::cerr << "DEBUG ERROR: AsyncReader stream finished but incomplete for request " << request_id << ". Expected " << remaining << " more bytes." << std::endl;
-                         bool previous = is_success->exchange(false);
-                         if (previous) {
-                             common::backend_api::Response r(request_id, common::ResponseCode::FileAccessError);
-                             responder->push(std::move(r));
-                         }
-                         return;
-                     }
-
-                     const auto running = counter->fetch_sub(1);
-                     std::cerr << "DEBUG: Async read request " << request_id << " chunk succeeded - " << running << " running" << std::endl;
-                     if (running == 1) {
-                         std::cerr << "DEBUG: Request " << request_id << " completely finished successfully. Pushing response." << std::endl;
-                         common::backend_api::Response r(request_id, common::ResponseCode::Success);
-                         responder->push(std::move(r));
-                     }
-                     return; // Done
-                }
-
-            } catch (const std::exception& e) {
-                std::cerr << "DEBUG ERROR: Exception in read_loop: " << e.what() << std::endl;
-                bool previous = is_success->exchange(false);
-                if (previous) {
-                     common::backend_api::Response r(request_id, common::ResponseCode::FileAccessError);
-                     responder->push(std::move(r));
-                }
-                return;
-            } catch (...) {
-                std::cerr << "DEBUG ERROR: Unknown exception in read_loop" << std::endl;
-                bool previous = is_success->exchange(false);
-                if (previous) {
-                     common::backend_api::Response r(request_id, common::ResponseCode::FileAccessError);
-                     responder->push(std::move(r));
-                }
-                return;
+                    const auto running = counter->fetch_sub(1);
+                    std::cerr << "DEBUG: Async read request " << request_id << " chunk succeeded - " << running << " running" << std::endl;
+                    if (running == 1) {
+                        std::cerr << "DEBUG: Request " << request_id << " completely finished successfully. Pushing response." << std::endl;
+                        common::backend_api::Response r(request_id, common::ResponseCode::Success);
+                        responder->push(std::move(r));
+                    }
             }
-        }
+        });
     }
 }
 
@@ -253,7 +234,11 @@ common::ResponseCode GCSClient::async_read(const char* path, common::backend_api
             }
 
             std::cerr << "DEBUG: _new_async_client->Open success for request " << request_id << ". Starting reads." << std::endl;
-            auto descriptor = *std::move(result);
+            
+            // Move descriptor to shared_ptr to share ownership with detached threads
+            auto descriptor_ptr = std::make_shared<std::decay_t<decltype(*result)>>(*std::move(result));
+            std::cerr << "DEBUG: Descriptor type: " << typeid(*descriptor_ptr).name() << std::endl;
+
             size_t current_offset = offset_;
             size_t current_total = total_;
             char* current_buffer = dest_buffer;
@@ -262,10 +247,11 @@ common::ResponseCode GCSClient::async_read(const char* path, common::backend_api
                  size_t bytesize = (i == size - 1 ? current_total : chunk_bytesize);
                  
                  std::cerr << "DEBUG: Triggering Read for request " << request_id << " offset=" << current_offset << " size=" << bytesize << std::endl;
-                 auto read_result = descriptor.Read(current_offset, bytesize);
+                 auto read_result = descriptor_ptr->Read(current_offset, bytesize);
                  
                  // Spawn a detached thread to handle the read loop to avoid blocking the callback thread
-                 std::thread([reader = std::move(read_result.first), token = std::move(read_result.second), current_buffer, bytesize, request_id, responder, counter, is_success]() mutable {
+                 // Capture descriptor_ptr to keep it alive
+                 std::thread([reader = std::move(read_result.first), token = std::move(read_result.second), current_buffer, bytesize, request_id, responder, counter, is_success, descriptor_ptr]() mutable {
                      std::cerr << "DEBUG: Detached thread started for request " << request_id << std::endl;
                      read_loop(std::move(reader), std::move(token), current_buffer, bytesize, request_id, responder, counter, is_success);
                      std::cerr << "DEBUG: Detached thread finished initiating read_loop for request " << request_id << std::endl;
