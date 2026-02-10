@@ -10,6 +10,10 @@
 #include <fstream>
 #include <thread>
 #include <algorithm>
+#include <cstdlib>
+#include <set>
+#include <chrono>
+#include <iostream>
 
 namespace runai::llm::streamer::impl::gcs
 {
@@ -17,6 +21,24 @@ namespace runai::llm::streamer::impl::gcs
 ClientConfiguration::ClientConfiguration()
 {
     std::cerr << "DEBUG: ClientConfiguration constructor called" << std::endl;
+    
+    // Debug helper to check raw env var
+    auto check_env = [](const char* name) {
+        const char* val = std::getenv(name);
+        if (val) {
+            std::cerr << "DEBUG: Env var " << name << " = '" << val << "'" << std::endl;
+        } else {
+            std::cerr << "DEBUG: Env var " << name << " is unset" << std::endl;
+        }
+    };
+
+    check_env("RUNAI_STREAMER_S3_MAX_CONNECTIONS");
+    check_env("RUNAI_STREAMER_CONCURRENCY");
+    check_env("RUNAI_STREAMER_S3_REQUEST_TIMEOUT_MS");
+    check_env("RUNAI_STREAMER_S3_LOW_SPEED_LIMIT");
+    check_env("RUNAI_STREAMER_S3_TRACE");
+    check_env("RUNAI_STREAMER_GCS_USE_ASYNC_CLIENT");
+
     const auto max_connections = utils::getenv<unsigned long>("RUNAI_STREAMER_S3_MAX_CONNECTIONS", 0);
     if (max_connections) {
         max_concurrency = max_connections;
@@ -81,7 +103,20 @@ ClientConfiguration::ClientConfiguration()
         }
     }
 
-    use_new_async_client = utils::getenv<bool>("RUNAI_STREAMER_GCS_USE_ASYNC_CLIENT", false);
+    try {
+        use_new_async_client = utils::getenv<bool>("RUNAI_STREAMER_GCS_USE_ASYNC_CLIENT", false);
+    } catch (const std::exception& e) {
+        std::cerr << "DEBUG ERROR: Failed to parse RUNAI_STREAMER_GCS_USE_ASYNC_CLIENT: " << e.what() << std::endl;
+        // Fallback or rethrow? Let's check the raw value manually to be helpful.
+        std::string raw_val = std::getenv("RUNAI_STREAMER_GCS_USE_ASYNC_CLIENT") ? std::getenv("RUNAI_STREAMER_GCS_USE_ASYNC_CLIENT") : "";
+        if (raw_val == "true" || raw_val == "True" || raw_val == "TRUE") {
+            use_new_async_client = true;
+            std::cerr << "DEBUG: Handled 'true' string manually." << std::endl;
+        } else {
+             throw; // Rethrow if it's not a simple boolean string mismatch
+        }
+    }
+
     if (use_new_async_client) {
         LOG(DEBUG) << "Using new AsyncClient";
         std::cerr << "DEBUG: ClientConfiguration: RUNAI_STREAMER_GCS_USE_ASYNC_CLIENT is TRUE" << std::endl;
