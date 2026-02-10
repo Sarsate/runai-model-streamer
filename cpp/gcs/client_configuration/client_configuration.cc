@@ -16,6 +16,7 @@ namespace runai::llm::streamer::impl::gcs
 
 ClientConfiguration::ClientConfiguration()
 {
+    std::cerr << "DEBUG: ClientConfiguration constructor called" << std::endl;
     const auto max_connections = utils::getenv<unsigned long>("RUNAI_STREAMER_S3_MAX_CONNECTIONS", 0);
     if (max_connections) {
         max_concurrency = max_connections;
@@ -83,7 +84,9 @@ ClientConfiguration::ClientConfiguration()
     use_new_async_client = utils::getenv<bool>("RUNAI_STREAMER_GCS_USE_ASYNC_CLIENT", false);
     if (use_new_async_client) {
         LOG(DEBUG) << "Using new AsyncClient";
+        std::cerr << "DEBUG: ClientConfiguration: RUNAI_STREAMER_GCS_USE_ASYNC_CLIENT is TRUE" << std::endl;
     }
+    std::cerr << "DEBUG: ClientConfiguration constructor finished" << std::endl;
 }
 
 }; // namespace runai::llm::streamer::impl::gcs

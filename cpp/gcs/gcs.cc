@@ -33,15 +33,19 @@ common::backend_api::ResponseCode_t obj_create_client(common::backend_api::Objec
     common::ResponseCode ret = common::ResponseCode::Success;
     try
     {
+        std::cerr << "DEBUG: obj_create_client called" << std::endl;
         *out_client_handle = GCSClientMgr::pop(*client_initial_config);
+        std::cerr << "DEBUG: obj_create_client success" << std::endl;
     }
     catch(const common::Exception & e)
     {
+        std::cerr << "DEBUG ERROR: obj_create_client caught common::Exception: " << static_cast<int>(e.error()) << std::endl;
         ret = e.error();
         *out_client_handle = nullptr;
     }
     catch(const std::exception & e)
     {
+        std::cerr << "DEBUG ERROR: obj_create_client caught std::exception: " << e.what() << std::endl;
         LOG(ERROR) << "Failed to create GCS client";
         ret = common::ResponseCode::FileAccessError;
         *out_client_handle = nullptr;
