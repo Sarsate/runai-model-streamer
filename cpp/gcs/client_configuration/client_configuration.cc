@@ -79,6 +79,11 @@ ClientConfiguration::ClientConfiguration()
             throw common::Exception(common::ResponseCode::InvalidParameterError);
         }
     }
+
+    use_new_async_client = utils::getenv<bool>("RUNAI_STREAMER_GCS_USE_ASYNC_CLIENT", false);
+    if (use_new_async_client) {
+        LOG(DEBUG) << "Using new AsyncClient";
+    }
 }
 
 }; // namespace runai::llm::streamer::impl::gcs

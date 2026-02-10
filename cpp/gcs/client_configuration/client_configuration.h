@@ -12,6 +12,7 @@ struct ClientConfiguration
     ClientConfiguration();
     google::cloud::Options options;
     unsigned max_concurrency;
+    bool use_new_async_client = false;
 };
 
 }; //namespace runai::llm::streamer::impl::gcs

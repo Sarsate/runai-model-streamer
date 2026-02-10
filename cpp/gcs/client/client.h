@@ -11,6 +11,8 @@
 #include "gcs/client/async_gcs_client/async_gcs_client.h"
 
 #include "google/cloud/storage/client.h"
+#include "google/cloud/storage/async/client.h"
+#include "google/cloud/storage/async/object_descriptor.h"
 #include "google/cloud/options.h"
 
 #include "common/backend_api/response/response.h"
@@ -19,6 +21,9 @@
 #include "common/s3_wrapper/s3_wrapper.h"
 #include "common/shared_queue/shared_queue.h"
 #include "common/range/range.h"
+
+#include <map>
+#include <mutex>
 
 namespace runai::llm::streamer::impl::gcs
 {
@@ -43,6 +48,11 @@ struct GCSClient : common::IClient
     ClientConfiguration _client_config;
     const size_t _chunk_bytesize;
     std::unique_ptr<AsyncGcsClient> _client;
+    std::unique_ptr<google::cloud::storage::AsyncClient> _new_async_client;
+
+    using DescriptorFuture = google::cloud::shared_future<std::shared_ptr<google::cloud::storage::ObjectDescriptor>>;
+    std::map<std::string, DescriptorFuture> _object_descriptors;
+    std::mutex _descriptors_mutex;
 
     // queue of asynchronous responses
     using Responder = common::SharedQueue<common::backend_api::Response>;
