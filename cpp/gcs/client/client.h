@@ -24,6 +24,7 @@
 
 #include <map>
 #include <mutex>
+#include <shared_mutex>
 #include <functional>
 
 namespace runai::llm::streamer::impl::gcs
@@ -53,7 +54,7 @@ struct GCSClient : common::IClient
     
     // Shared resources across all GCSClient instances
     static std::unique_ptr<google::cloud::storage_experimental::AsyncClient> _new_async_client;
-    static std::mutex _descriptors_mutex;
+    static std::shared_timed_mutex _descriptors_mutex;
     static std::map<std::string, std::shared_ptr<google::cloud::storage_experimental::ObjectDescriptor>> _descriptors;
     static std::map<std::string, std::vector<std::function<void(std::shared_ptr<google::cloud::storage_experimental::ObjectDescriptor>)>>> _pending_opens;
 

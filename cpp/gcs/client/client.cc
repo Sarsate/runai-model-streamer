@@ -27,12 +27,14 @@
 #include "utils/env/env.h"
 #include "utils/fd/fd.h"
 
+#include <shared_mutex>
+
 namespace runai::llm::streamer::impl::gcs
 {
 
 // Define static members
 std::unique_ptr<google::cloud::storage_experimental::AsyncClient> GCSClient::_new_async_client;
-std::mutex GCSClient::_descriptors_mutex;
+std::shared_timed_mutex GCSClient::_descriptors_mutex;
 std::map<std::string, std::shared_ptr<google::cloud::storage_experimental::ObjectDescriptor>> GCSClient::_descriptors;
 std::map<std::string, std::vector<std::function<void(std::shared_ptr<google::cloud::storage_experimental::ObjectDescriptor>)>>> GCSClient::_pending_opens;
 
@@ -43,7 +45,7 @@ GCSClient::GCSClient(const common::backend_api::ObjectClientConfig_t& config) :
 {
     std::cerr << "DEBUG: GCSClient constructor called" << std::endl;
     if (_client_config.use_new_async_client) {
-        std::lock_guard<std::mutex> lock(_descriptors_mutex);
+        std::unique_lock<std::shared_timed_mutex> lock(_descriptors_mutex);
         if (!_new_async_client) {
             std::cerr << "DEBUG: Initializing SHARED AsyncClient" << std::endl;
             _new_async_client = std::make_unique<google::cloud::storage_experimental::AsyncClient>(_client_config.options);
@@ -216,14 +218,28 @@ common::ResponseCode GCSClient::async_read(const char* path, common::backend_api
             }
         };
 
-        std::unique_lock<std::mutex> lock(_descriptors_mutex);
+        {
+            // 1. Check Cache (Shared Lock)
+            std::shared_lock<std::shared_timed_mutex> lock(_descriptors_mutex);
+            auto it = _descriptors.find(key);
+            if (it != _descriptors.end()) {
+                auto descriptor = it->second;
+                lock.unlock();
+                // std::cerr << "DEBUG: Cache hit for descriptor: " << key << std::endl;
+                trigger_reads(descriptor);
+                return _stop ? common::ResponseCode::FinishedError : common::ResponseCode::Success;
+            }
+        }
 
-        // 1. Check Cache: If descriptor exists, use it immediately.
+        // Cache Miss - Upgrade to Exclusive Lock
+        std::unique_lock<std::shared_timed_mutex> lock(_descriptors_mutex);
+
+        // 1b. Double Check Cache (Exclusive Lock)
         auto it = _descriptors.find(key);
         if (it != _descriptors.end()) {
             auto descriptor = it->second;
             lock.unlock();
-            // std::cerr << "DEBUG: Cache hit for descriptor: " << key << std::endl;
+            // std::cerr << "DEBUG: Cache hit (after lock upgrade) for descriptor: " << key << std::endl;
             trigger_reads(descriptor);
             return _stop ? common::ResponseCode::FinishedError : common::ResponseCode::Success;
         }
@@ -270,7 +286,7 @@ common::ResponseCode GCSClient::async_read(const char* path, common::backend_api
                 // 4. Fan-Out: Execute all queued callbacks.
                 std::vector<std::function<void(std::shared_ptr<google::cloud::storage_experimental::ObjectDescriptor>)>> callbacks;
                 {
-                    std::lock_guard<std::mutex> lock(_descriptors_mutex);
+                    std::unique_lock<std::shared_timed_mutex> lock(_descriptors_mutex);
                     
                     if (descriptor) {
                         _descriptors[key] = descriptor; // Cache the successful descriptor
