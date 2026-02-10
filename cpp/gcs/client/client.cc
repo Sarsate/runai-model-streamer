@@ -6,6 +6,7 @@
 #include <future>
 #include <memory>
 #include <functional>
+#include <iostream>
 
 #include "google/cloud/future.h"
 #include "google/cloud/storage/client.h"
@@ -30,6 +31,7 @@ GCSClient::GCSClient(const common::backend_api::ObjectClientConfig_t& config) :
     _chunk_bytesize(config.default_storage_chunk_size)
 {
     _client = std::make_unique<AsyncGcsClient>(_client_config.options, _client_config.max_concurrency);
+    std::cout << "DEBUG: Custom Run:ai Streamer build is active!" << std::endl;
 }
 
 bool GCSClient::verify_credentials(const common::backend_api::ObjectClientConfig_t & config) const

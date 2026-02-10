@@ -5,7 +5,7 @@ def load_gcp_repo():
     # NOTE: Update this version and SHA256 as needed.
     http_archive(
         name = "google_cloud_cpp",
-        sha256 = "10867580483cb338e7d50920c2383698f3572cc6b4c7d072e38d5f43755cbd80",
-        strip_prefix = "google-cloud-cpp-2.37.0",
-        url = "https://github.com/googleapis/google-cloud-cpp/archive/v2.37.0.tar.gz",
+        sha256 = "492734e092e5150d8395797f0d269f3d1e49ba3a959db4a332d15a1f382ff7ee",
+        strip_prefix = "google-cloud-cpp-2.46.0",
+	url = "https://github.com/googleapis/google-cloud-cpp/archive/refs/tags/v2.46.0.tar.gz"
     )
