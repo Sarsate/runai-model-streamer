@@ -48,11 +48,7 @@ struct GCSClient : common::IClient
     ClientConfiguration _client_config;
     const size_t _chunk_bytesize;
     std::unique_ptr<AsyncGcsClient> _client;
-    std::unique_ptr<google::cloud::storage::AsyncClient> _new_async_client;
-
-    using DescriptorFuture = google::cloud::shared_future<std::shared_ptr<google::cloud::storage::ObjectDescriptor>>;
-    std::map<std::string, DescriptorFuture> _object_descriptors;
-    std::mutex _descriptors_mutex;
+    std::unique_ptr<google::cloud::storage_experimental::AsyncClient> _new_async_client;
 
     // queue of asynchronous responses
     using Responder = common::SharedQueue<common::backend_api::Response>;

@@ -35,7 +35,7 @@ GCSClient::GCSClient(const common::backend_api::ObjectClientConfig_t& config) :
     _chunk_bytesize(config.default_storage_chunk_size)
 {
     if (_client_config.use_new_async_client) {
-        _new_async_client = std::make_unique<google::cloud::storage::AsyncClient>(_client_config.options);
+        _new_async_client = std::make_unique<google::cloud::storage_experimental::AsyncClient>(_client_config.options);
     } else {
         _client = std::make_unique<AsyncGcsClient>(_client_config.options, _client_config.max_concurrency);
     }
@@ -86,8 +86,8 @@ common::ResponseCode write_stream_to_buffer(
 }
 
 namespace {
-    void read_loop(google::cloud::storage::AsyncReader reader,
-                   google::cloud::storage::AsyncToken token,
+    void read_loop(google::cloud::storage_experimental::AsyncReader reader,
+                   google::cloud::storage_experimental::AsyncToken token,
                    char* buffer,
                    size_t remaining,
                    common::backend_api::ObjectRequestId_t request_id,
@@ -176,47 +176,37 @@ common::ResponseCode GCSClient::async_read(const char* path, common::backend_api
         size_t total_ = range.length;
         size_t offset_ = range.offset;
 
-        DescriptorFuture desc_future;
-        {
-            std::lock_guard<std::mutex> lock(_descriptors_mutex);
-            auto it = _object_descriptors.find(path);
-            if (it != _object_descriptors.end()) {
-                desc_future = it->second;
-            } else {
-                 auto fut = _new_async_client->Open(google::cloud::storage::BucketName(bucket_name), path_name);
-                 desc_future = fut.then([](auto f) -> std::shared_ptr<google::cloud::storage::ObjectDescriptor> {
-                    auto result = f.get();
-                    if (!result) return nullptr;
-                    return std::make_shared<google::cloud::storage::ObjectDescriptor>(*std::move(result));
-                }).share();
-                _object_descriptors[path] = desc_future;
-            }
-        }
+        auto fut = _new_async_client->Open(google::cloud::storage_experimental::BucketName(bucket_name), path_name);
 
-        for (unsigned i = 0; i < size && !_stop; ++i)
-        {
-            size_t bytesize_ = (i == size - 1 ? total_ : _chunk_bytesize);
-            
-            desc_future.then([dest_buffer = buffer_, responder = _responder, request_id, bytesize_, offset_, counter, is_success](auto f) {
-                auto descriptor_ptr = f.get();
-                if (!descriptor_ptr) {
-                    LOG(ERROR) << "Failed to open object descriptor for request " << request_id;
-                    bool previous = is_success->exchange(false);
-                    if (previous) {
-                        common::backend_api::Response r(request_id, common::ResponseCode::FileAccessError);
-                        responder->push(std::move(r));
-                    }
-                    return;
+        fut.then([dest_buffer = buffer_, responder = _responder, request_id, size, total_, offset_, chunk_bytesize = _chunk_bytesize, counter, is_success](auto f) {
+            auto result = f.get();
+            if (!result) {
+                LOG(ERROR) << "Failed to open object descriptor for request " << request_id << ": " << result.status().message();
+                bool previous = is_success->exchange(false);
+                if (previous) {
+                    common::backend_api::Response r(request_id, common::ResponseCode::FileAccessError);
+                    responder->push(std::move(r));
                 }
-                
-                auto result = descriptor_ptr->Read(offset_, bytesize_);
-                read_loop(std::move(result.first), std::move(result.second), dest_buffer, bytesize_, request_id, responder, counter, is_success);
-            });
+                return;
+            }
 
-            total_ -= bytesize_;
-            offset_ += bytesize_;
-            buffer_ += bytesize_;
-        }
+            auto descriptor = *std::move(result);
+            size_t current_offset = offset_;
+            size_t current_total = total_;
+            char* current_buffer = dest_buffer;
+
+            for (unsigned i = 0; i < size; ++i) {
+                 size_t bytesize = (i == size - 1 ? current_total : chunk_bytesize);
+                 
+                 auto read_result = descriptor.Read(current_offset, bytesize);
+                 read_loop(std::move(read_result.first), std::move(read_result.second), current_buffer, bytesize, request_id, responder, counter, is_success);
+                 
+                 current_total -= bytesize;
+                 current_offset += bytesize;
+                 current_buffer += bytesize;
+            }
+        });
+
         return _stop ? common::ResponseCode::FinishedError : common::ResponseCode::Success;
     }
 
