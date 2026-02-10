@@ -3,6 +3,7 @@
 
 #include <memory>
 #include <utility>
+#include <iostream>
 
 #include "streamer/impl/s3/s3.h"
 
@@ -60,6 +61,7 @@ common::ResponseCode Workload::verify_batch(const Batch & batch)
 
 void Workload::execute(std::atomic<bool> & stopped)
 {
+    // std::cerr << "DEBUG: Workload::execute called. Size=" << size() << " IsObjStorage=" << is_object_storage() << std::endl;
     if (size() == 0)
     {
         return;
@@ -68,6 +70,7 @@ void Workload::execute(std::atomic<bool> & stopped)
     // create reader
     if (is_object_storage())
     {
+        // std::cerr << "DEBUG: Workload::execute calling async_read (is_object_storage=true)" << std::endl;
         async_read(stopped);
     }
     else
@@ -100,6 +103,7 @@ void Workload::assign_global_ids()
 
 void Workload::async_read(std::atomic<bool> & stopped)
 {
+    // std::cerr << "DEBUG: Workload::async_read called" << std::endl;
     auto response_code = common::ResponseCode::Success;
     try
     {
@@ -110,9 +114,21 @@ void Workload::async_read(std::atomic<bool> & stopped)
         auto s3_client = std::make_shared<common::s3::S3ClientWrapper>(_batches_by_file_index.begin()->second.object_storage_params);
         _reader = std::make_shared<S3>(s3_client, *config);
 
+        // Pre-open all files to maximize concurrency and reduce startup latency
+        // Collect all paths first
+        std::vector<std::string> paths;
+        paths.reserve(_batches_by_file_index.size());
+        for (auto & [file_index, batch] : _batches_by_file_index)
+        {
+            paths.push_back(batch.path);
+        }
+        // std::cerr << "DEBUG: Workload calling PreOpen for " << paths.size() << " files" << std::endl;
+        _reader->PreOpen(paths);
+
         unsigned requested_batches = 0;
         for (auto & [file_index, batch] : _batches_by_file_index)
         {
+            // std::cerr << "DEBUG: Workload handling batch " << file_index << std::endl;
             _error_by_file_index[file_index] = handle_batch(file_index, batch, stopped);
             requested_batches += (_error_by_file_index[file_index] == common::ResponseCode::Success ? 1 : 0);
         }
@@ -121,11 +137,15 @@ void Workload::async_read(std::atomic<bool> & stopped)
         if (requested_batches > 0)
         {
             LOG(DEBUG) << "Waiting for responses";
+            // std::cerr << "DEBUG: Workload waiting for responses..." << std::endl;
             wait_for_responses(stopped);
+        } else {
+            // std::cerr << "DEBUG: Workload NO requested batches!" << std::endl;
         }
     }
     catch(const common::Exception & e)
     {
+        // std::cerr << "DEBUG ERROR: Workload::async_read caught common::Exception " << static_cast<int>(e.error()) << std::endl;
         if (e.error() != common::ResponseCode::FinishedError)
         {
             LOG(ERROR) << "Error " << e.error() << " while reading batches";
@@ -134,6 +154,7 @@ void Workload::async_read(std::atomic<bool> & stopped)
     }
     catch (...)
     {
+        // std::cerr << "DEBUG ERROR: Workload::async_read caught unknown exception" << std::endl;
         LOG(ERROR) << "Unknown error while reading batches";
         response_code = common::ResponseCode::UnknownError;
     }

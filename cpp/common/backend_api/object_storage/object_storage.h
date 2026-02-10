@@ -201,4 +201,18 @@ ResponseCode_t obj_cancel_all_reads();
  */
 ResponseCode_t obj_remove_all_clients();
 
+/**
+ * Initiates connection to the object storage for the given paths and waits for them to complete.
+ * This is an optimization to pre-establish connections before read requests are made.
+ * - client_handle - Handle to the client instance.
+ * - paths - Array of object identifiers.
+ * - num_paths - Number of paths.
+ * return success or an error code.
+ */
+ResponseCode_t obj_pre_open(
+    ObjectClientHandle_t client_handle,
+    const char** paths,
+    unsigned int num_paths
+);
+
 } // namespace runai::llm::streamer::common::backend_api

@@ -6,6 +6,9 @@
 #include <future>
 #include <memory>
 #include <functional>
+#include <iostream>
+#include <cstring>
+#include <thread>
 
 #include "google/cloud/future.h"
 #include "google/cloud/storage/client.h"
@@ -21,6 +24,10 @@
 #include "utils/env/env.h"
 #include "utils/fd/fd.h"
 
+#include <shared_mutex>
+
+#include <unistd.h> // For getpid()
+
 namespace runai::llm::streamer::impl::gcs
 {
 
@@ -29,7 +36,11 @@ GCSClient::GCSClient(const common::backend_api::ObjectClientConfig_t& config) :
     _responder(nullptr),
     _chunk_bytesize(config.default_storage_chunk_size)
 {
-    _client = std::make_unique<AsyncGcsClient>(_client_config.options, _client_config.max_concurrency);
+    if (_client_config.use_new_async_client) {
+        _async_client_grpc = std::make_unique<AsyncClientGrpc>(_client_config);
+    } else {
+        _client = std::make_unique<AsyncGcsClient>(_client_config.options, _client_config.max_concurrency);
+    }
 }
 
 bool GCSClient::verify_credentials(const common::backend_api::ObjectClientConfig_t & config) const
@@ -55,24 +66,37 @@ common::ResponseCode write_stream_to_buffer(
         size_t bytesize,
         common::backend_api::ObjectRequestId_t request_id) {
     size_t bytes_received = 0;
-    while (stream.read(dest_buffer, bytesize)) {
-        bytes_received += stream.gcount();
+    char* ptr = dest_buffer;
+    size_t remaining = bytesize;
+
+    // Robust read loop
+    while (remaining > 0 && stream) {
+        stream.read(ptr, remaining);
+        std::streamsize count = stream.gcount();
+        bytes_received += count;
+        ptr += count;
+        remaining -= count;
     }
+    
     stream.Close();
+
     if (bytes_received != bytesize) {
-        LOG(ERROR) << "GCS ReadObject received " << bytes_received << " bytes, but "
-                << bytesize << " were requested. This is unexpected." << std::endl;
         return common::ResponseCode::FileAccessError;
     }
     if (stream.bad()) {
-        // Note: currently a failure to read any sub range fails the entire read request
-        //       a retry mechanism should be added for failed reads
-        const auto & err = stream.status();
-        LOG(ERROR) << "Failed to download GCS object of request " << request_id << " " << err.code() << ": " << err.message();
         return common::ResponseCode::FileAccessError;
     }
 
     return common::ResponseCode::Success;
+}
+
+void GCSClient::PreOpen(const std::vector<std::string>& paths) {
+    if (_client_config.use_new_async_client && _async_client_grpc) {
+        _async_client_grpc->PreOpen(paths);
+    }
+}
+
+GCSClient::~GCSClient() {
 }
 
 common::ResponseCode GCSClient::async_read(const char* path, common::backend_api::ObjectRange_t range, char* destination_buffer, common::backend_api::ObjectRequestId_t request_id)
@@ -86,10 +110,13 @@ common::ResponseCode GCSClient::async_read(const char* path, common::backend_api
         _responder->increment(1);
     }
 
+    if (_client_config.use_new_async_client && _async_client_grpc) {
+        return _async_client_grpc->Read(path, range, destination_buffer, request_id, _responder);
+    }
+
     char * buffer_ = destination_buffer;
     // split range into chunks
     size_t size = std::max(1UL, range.length/_chunk_bytesize);
-    LOG(SPAM) << "Number of chunks is: " << size;
 
     // each range is divided into chunks (size is the number of chunks)
     // when all the chunks have been read successfuly the response for that range is pushed to the responder
@@ -117,7 +144,6 @@ common::ResponseCode GCSClient::async_read(const char* path, common::backend_api
             if (response_code == common::ResponseCode::Success)
             {
                 const auto running = counter->fetch_sub(1);
-                LOG(SPAM) << "Async read request " << request_id << " succeeded - " << running << " running";
                 // send success response only if all the requests have succeeded
                 // note that unsuccessful attempts do not update the counter
                 if (running == 1)
@@ -151,6 +177,9 @@ common::ResponseCode GCSClient::async_read(const char* path, common::backend_api
 void GCSClient::stop()
 {
     _stop = true;
+    if (_async_client_grpc) {
+        _async_client_grpc->Stop();
+    }
     if (_responder != nullptr)
     {
         _responder->stop();

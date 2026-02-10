@@ -208,4 +208,13 @@ common::backend_api::ResponseCode_t obj_wait_for_completions(common::backend_api
     return common::ResponseCode::UnknownError;
 }
 
+common::backend_api::ResponseCode_t obj_pre_open(
+    common::backend_api::ObjectClientHandle_t client_handle,
+    const char** paths,
+    unsigned int num_paths)
+{
+    // No-op for S3 backend
+    return common::ResponseCode::Success;
+}
+
 }; // namespace runai::llm::streamer::impl::s3

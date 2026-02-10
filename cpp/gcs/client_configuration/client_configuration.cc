@@ -1,6 +1,7 @@
 #include "gcs/client_configuration/client_configuration.h"
 
 #include "google/cloud/storage/client.h"
+#include "google/cloud/grpc_options.h"
 
 #include "common/exception/exception.h"
 #include "common/response_code/response_code.h"
@@ -10,13 +11,38 @@
 #include <fstream>
 #include <thread>
 #include <algorithm>
+#include <cstdlib>
+#include <set>
+#include <chrono>
+#include <iostream>
 
 namespace runai::llm::streamer::impl::gcs
 {
 
 ClientConfiguration::ClientConfiguration()
 {
+    // std::cerr << "DEBUG: ClientConfiguration constructor called" << std::endl;
+    
+    // Debug helper to check raw env var
+    auto check_env = [](const char* name) {
+        const char* val = std::getenv(name);
+        if (val) {
+            // std::cerr << "DEBUG: Env var " << name << " = '" << val << "'" << std::endl;
+        } else {
+            // std::cerr << "DEBUG: Env var " << name << " is unset" << std::endl;
+        }
+    };
+
+    check_env("RUNAI_STREAMER_S3_MAX_CONNECTIONS");
+    check_env("RUNAI_STREAMER_CONCURRENCY");
+    check_env("RUNAI_STREAMER_S3_REQUEST_TIMEOUT_MS");
+    check_env("RUNAI_STREAMER_S3_LOW_SPEED_LIMIT");
+    check_env("RUNAI_STREAMER_S3_TRACE");
+    check_env("RUNAI_STREAMER_GCS_USE_ASYNC_CLIENT");
+
     const auto max_connections = utils::getenv<unsigned long>("RUNAI_STREAMER_S3_MAX_CONNECTIONS", 0);
+    unsigned long worker_concurrency = utils::getenv<unsigned long>("RUNAI_STREAMER_CONCURRENCY", 8UL);
+
     if (max_connections) {
         max_concurrency = max_connections;
     } else {
@@ -24,9 +50,8 @@ ClientConfiguration::ClientConfiguration()
         // Use at least 8 threads if hardware_concurrency cannot be computed.
         LOG(SPAM) << "Hardware concurrency detected: " << nprocs;
         unsigned default_max_concurrency = nprocs == 0 ? 8U : 1U;
-        unsigned worker_concurrency = utils::getenv<unsigned long>("RUNAI_STREAMER_CONCURRENCY", 8UL);
         LOG(SPAM) << "Streamer worker concurrency: " << worker_concurrency;
-        max_concurrency = std::max(default_max_concurrency, nprocs * 2 / worker_concurrency);
+        max_concurrency = std::max(static_cast<unsigned long>(default_max_concurrency), nprocs * 2 / worker_concurrency);
     }
     LOG(DEBUG) << "GCS per-client concurrency is set to: " << max_concurrency;
 
@@ -46,6 +71,7 @@ ClientConfiguration::ClientConfiguration()
         options.set<google::cloud::storage::DownloadStallMinimumRateOption>(low_speed_limit);
     }
 
+    /*
     const auto trace_gcs = utils::getenv<bool>("RUNAI_STREAMER_S3_TRACE", false);
     if (trace_gcs)
     {
@@ -57,6 +83,7 @@ ClientConfiguration::ClientConfiguration()
 
         options.set<google::cloud::LoggingComponentsOption>(std::move(logging_components));
     }
+    */
 
     const auto sa_key_file_name = utils::getenv<std::string>("RUNAI_STREAMER_GCS_CREDENTIAL_FILE", "");
     if (!sa_key_file_name.empty()) {
@@ -79,6 +106,46 @@ ClientConfiguration::ClientConfiguration()
             throw common::Exception(common::ResponseCode::InvalidParameterError);
         }
     }
+
+    try {
+        use_new_async_client = utils::getenv<bool>("RUNAI_STREAMER_GCS_USE_ASYNC_CLIENT", false);
+    } catch (const std::exception& e) {
+        // std::cerr << "DEBUG ERROR: Failed to parse RUNAI_STREAMER_GCS_USE_ASYNC_CLIENT: " << e.what() << std::endl;
+        // Fallback or rethrow? Let's check the raw value manually to be helpful.
+        std::string raw_val = std::getenv("RUNAI_STREAMER_GCS_USE_ASYNC_CLIENT") ? std::getenv("RUNAI_STREAMER_GCS_USE_ASYNC_CLIENT") : "";
+        if (raw_val == "true" || raw_val == "True" || raw_val == "TRUE") {
+            use_new_async_client = true;
+            // std::cerr << "DEBUG: Handled 'true' string manually." << std::endl;
+        } else {
+             throw; // Rethrow if it's not a simple boolean string mismatch
+        }
+    }
+
+    if (use_new_async_client) {
+        LOG(DEBUG) << "Using new AsyncClient";
+        // std::cerr << "DEBUG: ClientConfiguration: RUNAI_STREAMER_GCS_USE_ASYNC_CLIENT is TRUE" << std::endl;
+
+        // For the new global client (or per-worker client), we want to partition the 
+        // global resource budget among the workers.
+        // If concurrency is 1, it gets the full budget.
+        // If concurrency is 20, each worker gets a slice.
+        
+        int target_global_channels = 24;
+        int target_global_threads = 96;
+
+        int num_channels = std::max(1, target_global_channels / (int)worker_concurrency);
+        options.set<google::cloud::GrpcNumChannelsOption>(num_channels);
+
+        // Ensure at least 8 threads per worker to prevent starvation, 
+        // but otherwise scale down from the global budget.
+        int num_threads = std::max(8, target_global_threads / (int)worker_concurrency);
+        options.set<google::cloud::GrpcBackgroundThreadPoolSizeOption>(num_threads);
+
+        LOG(DEBUG) << "Setting GrpcNumChannelsOption to " << num_channels 
+                   << " and GrpcBackgroundThreadPoolSizeOption to " << num_threads
+                   << " (Worker Concurrency: " << worker_concurrency << ")";
+    }
+    // std::cerr << "DEBUG: ClientConfiguration constructor finished" << std::endl;
 }
 
 }; // namespace runai::llm::streamer::impl::gcs

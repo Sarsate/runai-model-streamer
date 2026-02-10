@@ -9,6 +9,7 @@
 
 #include "gcs/client_configuration/client_configuration.h"
 #include "gcs/client/async_gcs_client/async_gcs_client.h"
+#include "gcs/client/async_gcs_client/async_client_grpc.h"
 
 #include "google/cloud/storage/client.h"
 #include "google/cloud/options.h"
@@ -20,12 +21,18 @@
 #include "common/shared_queue/shared_queue.h"
 #include "common/range/range.h"
 
+#include <map>
+#include <mutex>
+#include <shared_mutex>
+#include <functional>
+
 namespace runai::llm::streamer::impl::gcs
 {
 
 struct GCSClient : common::IClient
 {
     GCSClient(const common::backend_api::ObjectClientConfig_t& config);
+    ~GCSClient();
 
      // verify that client's credentials have not changed
     bool verify_credentials(const common::backend_api::ObjectClientConfig_t & config) const;
@@ -33,6 +40,9 @@ struct GCSClient : common::IClient
     common::ResponseCode async_read(const char* path, common::backend_api::ObjectRange_t range, char* destination_buffer, common::backend_api::ObjectRequestId_t request_id);
 
     common::backend_api::Response async_read_response();
+
+    // Initiate connection to the object storage for the given paths and wait for completion
+    void PreOpen(const std::vector<std::string>& paths);
 
     // Stop sending requests to the object store
     // If stopped before all requests for an async_read() call are sent, subsequent request chunks will not be sent.
@@ -43,6 +53,7 @@ struct GCSClient : common::IClient
     ClientConfiguration _client_config;
     const size_t _chunk_bytesize;
     std::unique_ptr<AsyncGcsClient> _client;
+    std::unique_ptr<AsyncClientGrpc> _async_client_grpc;
 
     // queue of asynchronous responses
     using Responder = common::SharedQueue<common::backend_api::Response>;

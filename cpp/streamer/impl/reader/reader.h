@@ -34,6 +34,8 @@ struct Reader
     virtual void async_read(const common::s3::S3ClientWrapper::Params & params, common::backend_api::ObjectRequestId_t request_handle, const common::Range & range, char * buffer) = 0;
     virtual common::ResponseCode async_response(std::vector<common::backend_api::Response> & responses, unsigned max_responses) = 0;
 
+    virtual void PreOpen(const std::vector<std::string>& paths) {}
+
     const Mode mode;
 };
 

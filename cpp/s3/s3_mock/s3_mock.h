@@ -42,6 +42,12 @@ extern "C" common::backend_api::ResponseCode_t obj_wait_for_completions(
     common::backend_api::ObjectWaitMode_t wait_mode
 );
 
+extern "C" common::backend_api::ResponseCode_t obj_pre_open(
+    common::backend_api::ObjectClientHandle_t client_handle,
+    const char** paths,
+    unsigned int num_paths
+);
+
 extern "C" common::backend_api::ResponseCode_t obj_cancel_all_reads();
 extern "C" common::backend_api::ResponseCode_t obj_remove_all_clients();
 
