@@ -145,14 +145,6 @@ ClientConfiguration::ClientConfiguration()
                    << " and GrpcBackgroundThreadPoolSizeOption to " << num_threads
                    << " (Worker Concurrency: " << worker_concurrency << ")";
     }
-
-    const auto disable_checksums = utils::getenv<bool>("RUNAI_STREAMER_S3_DISABLE_CHECKSUMS", false);
-    if (disable_checksums) {
-        LOG(DEBUG) << "Disabling CRC32c and MD5 checksum validation for performance.";
-        options.set<google::cloud::storage::DisableCrc32cChecksums>(true);
-        options.set<google::cloud::storage::DisableMD5Hash>(true);
-    }
-
     // std::cerr << "DEBUG: ClientConfiguration constructor finished" << std::endl;
 }
 
