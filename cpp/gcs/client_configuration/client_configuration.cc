@@ -128,14 +128,11 @@ ClientConfiguration::ClientConfiguration()
         // now has its own AsyncClient, we should limit the number of channels per AsyncClient
         // to avoid exhausting file descriptors. 1 channel per client * max_concurrency clients
         // results in max_concurrency total channels, which is the intended behavior.
-        
-        // UPDATE: AsyncClient is SHARED (Singleton). We must scale the pool size.
-        // Cap at 64 to be safe.
-        int num_channels = std::max(1U, std::min((unsigned)max_concurrency, 64U));
+        int num_channels = 1;
         options.set<google::cloud::GrpcNumChannelsOption>(num_channels);
         
-        // Remove strict thread pool limit to allow background threads to scale with channels if needed
-        // options.set<google::cloud::GrpcBackgroundThreadPoolSizeOption>(1);
+        // Limit background threads per client to prevent thread explosion (50 clients * N threads)
+        options.set<google::cloud::GrpcBackgroundThreadPoolSizeOption>(1);
         
         // std::cerr << "DEBUG: Setting GrpcNumChannelsOption to " << num_channels << std::endl;
     }
