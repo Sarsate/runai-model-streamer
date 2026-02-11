@@ -132,10 +132,13 @@ ClientConfiguration::ClientConfiguration()
         options.set<google::cloud::GrpcNumChannelsOption>(num_channels);
 
         // Scale background threads similarly.
-        options.set<google::cloud::GrpcBackgroundThreadPoolSizeOption>(
-            96 / num_channels);
+        // Ensure at least 8 threads, or match worker concurrency if higher.
+        // This prevents starvation at high concurrency (e.g., 20 workers -> 20 threads).
+        int num_threads = std::max(8UL, worker_concurrency);
+        options.set<google::cloud::GrpcBackgroundThreadPoolSizeOption>(96);
 
-        LOG(DEBUG) << "Setting GrpcNumChannelsOption and GrpcBackgroundThreadPoolSizeOption to " << num_channels;
+        LOG(DEBUG) << "Setting GrpcNumChannelsOption to " << num_channels 
+                   << " and GrpcBackgroundThreadPoolSizeOption to " << num_threads;
     }
     // std::cerr << "DEBUG: ClientConfiguration constructor finished" << std::endl;
 }
