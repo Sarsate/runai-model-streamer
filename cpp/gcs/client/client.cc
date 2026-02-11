@@ -34,26 +34,17 @@
 namespace runai::llm::streamer::impl::gcs
 {
 
-// Define static members
-std::unique_ptr<google::cloud::storage_experimental::AsyncClient> GCSClient::_new_async_client;
-std::shared_timed_mutex GCSClient::_descriptors_mutex;
-std::map<std::string, std::shared_ptr<google::cloud::storage_experimental::ObjectDescriptor>> GCSClient::_descriptors;
-std::map<std::string, std::vector<std::function<void(std::shared_ptr<google::cloud::storage_experimental::ObjectDescriptor>)>>> GCSClient::_pending_opens;
-
 GCSClient::GCSClient(const common::backend_api::ObjectClientConfig_t& config) :
     _stop(false),
     _responder(nullptr),
     _chunk_bytesize(config.default_storage_chunk_size)
 {
-    std::cerr << "DEBUG: [PID=" << getpid() << "] GCSClient constructor called" << std::endl;
+    // std::cerr << "DEBUG: [PID=" << getpid() << "] GCSClient constructor called" << std::endl;
     if (_client_config.use_new_async_client) {
-        std::unique_lock<std::shared_timed_mutex> lock(_descriptors_mutex);
-        if (!_new_async_client) {
-            std::cerr << "DEBUG: [PID=" << getpid() << "] Initializing SHARED AsyncClient" << std::endl;
-            _new_async_client = std::make_unique<google::cloud::storage_experimental::AsyncClient>(_client_config.options);
-        }
+        // std::cerr << "DEBUG: [PID=" << getpid() << "] Initializing AsyncClient" << std::endl;
+        _new_async_client = std::make_unique<google::cloud::storage_experimental::AsyncClient>(_client_config.options);
     } else {
-        std::cerr << "DEBUG: Initializing LEGACY AsyncGcsClient" << std::endl;
+        // std::cerr << "DEBUG: Initializing LEGACY AsyncGcsClient" << std::endl;
         _client = std::make_unique<AsyncGcsClient>(_client_config.options, _client_config.max_concurrency);
     }
     // std::cout << "DEBUG: Custom Run:ai Streamer build is active!" << std::endl;
@@ -178,7 +169,8 @@ namespace {
 
 common::ResponseCode GCSClient::async_read(const char* path, common::backend_api::ObjectRange_t range, char* destination_buffer, common::backend_api::ObjectRequestId_t request_id)
 {
-    // std::cerr << "DEBUG: async_read called for request_id " << request_id << " path=" << path << std::endl;
+    // std::cerr << "DEBUG: async_read called for request_id " << request_id << " path=" << path 
+    //           << " range=[" << range.offset << ", " << range.length << "]" << std::endl;
     if (_responder == nullptr)
     {
         _responder = std::make_shared<Responder>(1);
@@ -191,8 +183,8 @@ common::ResponseCode GCSClient::async_read(const char* path, common::backend_api
     if (_client_config.use_new_async_client) {
         // std::cerr << "DEBUG: async_read using NEW AsyncClient" << std::endl;
         
-        size_t size = std::max(1UL, range.length/_chunk_bytesize);
-        auto pending_chunks = std::make_shared<std::atomic<unsigned>>(size);
+        // We use a single chunk for the whole range in the new async client
+        auto pending_chunks = std::make_shared<std::atomic<unsigned>>(1);
         auto is_success = std::make_shared<std::atomic<bool>>(true);
 
         const auto uri = common::s3::StorageUri(path);
@@ -200,24 +192,12 @@ common::ResponseCode GCSClient::async_read(const char* path, common::backend_api
         std::string path_name(uri.path);
         std::string key = path; // Use path as key as requested
 
-        // Helper to trigger reads on a descriptor
-        auto trigger_reads = [=, chunk_bytesize = _chunk_bytesize](std::shared_ptr<google::cloud::storage_experimental::ObjectDescriptor> descriptor) {
-            size_t current_offset = range.offset;
-            size_t current_total = range.length;
-            char* current_buffer = destination_buffer;
-
-            for (unsigned i = 0; i < size; ++i) {
-                 size_t bytesize = (i == size - 1 ? current_total : chunk_bytesize);
-                 
-                 auto read_result = descriptor->Read(current_offset, bytesize);
-                 
-                 StreamToBuffer(std::move(read_result.first), std::move(read_result.second), 
-                                current_buffer, bytesize, request_id, _responder, pending_chunks, is_success);
-
-                 current_total -= bytesize;
-                 current_offset += bytesize;
-                 current_buffer += bytesize;
-            }
+        // Helper to trigger read on a descriptor
+        auto trigger_read = [=](std::shared_ptr<google::cloud::storage_experimental::ObjectDescriptor> descriptor) {
+             auto read_result = descriptor->Read(range.offset, range.length);
+             
+             StreamToBuffer(std::move(read_result.first), std::move(read_result.second), 
+                            destination_buffer, range.length, request_id, _responder, pending_chunks, is_success);
         };
 
         {
@@ -228,7 +208,7 @@ common::ResponseCode GCSClient::async_read(const char* path, common::backend_api
                 auto descriptor = it->second;
                 lock.unlock();
                 // std::cerr << "DEBUG: Cache hit for descriptor: " << key << std::endl;
-                trigger_reads(descriptor);
+                trigger_read(descriptor);
                 return _stop ? common::ResponseCode::FinishedError : common::ResponseCode::Success;
             }
         }
@@ -242,7 +222,7 @@ common::ResponseCode GCSClient::async_read(const char* path, common::backend_api
             auto descriptor = it->second;
             lock.unlock();
             // std::cerr << "DEBUG: Cache hit (after lock upgrade) for descriptor: " << key << std::endl;
-            trigger_reads(descriptor);
+            trigger_read(descriptor);
             return _stop ? common::ResponseCode::FinishedError : common::ResponseCode::Success;
         }
 
@@ -256,7 +236,7 @@ common::ResponseCode GCSClient::async_read(const char* path, common::backend_api
                 }
                 return;
             }
-            trigger_reads(descriptor);
+            trigger_read(descriptor);
         };
 
         auto& pending = _pending_opens[key];

@@ -52,11 +52,11 @@ struct GCSClient : common::IClient
     const size_t _chunk_bytesize;
     std::unique_ptr<AsyncGcsClient> _client;
     
-    // Shared resources across all GCSClient instances
-    static std::unique_ptr<google::cloud::storage_experimental::AsyncClient> _new_async_client;
-    static std::shared_timed_mutex _descriptors_mutex;
-    static std::map<std::string, std::shared_ptr<google::cloud::storage_experimental::ObjectDescriptor>> _descriptors;
-    static std::map<std::string, std::vector<std::function<void(std::shared_ptr<google::cloud::storage_experimental::ObjectDescriptor>)>>> _pending_opens;
+    // Shared resources per GCSClient instance
+    std::unique_ptr<google::cloud::storage_experimental::AsyncClient> _new_async_client;
+    std::shared_timed_mutex _descriptors_mutex;
+    std::map<std::string, std::shared_ptr<google::cloud::storage_experimental::ObjectDescriptor>> _descriptors;
+    std::map<std::string, std::vector<std::function<void(std::shared_ptr<google::cloud::storage_experimental::ObjectDescriptor>)>>> _pending_opens;
 
     // queue of asynchronous responses
     using Responder = common::SharedQueue<common::backend_api::Response>;

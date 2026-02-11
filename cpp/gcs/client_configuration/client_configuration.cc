@@ -124,9 +124,11 @@ ClientConfiguration::ClientConfiguration()
         LOG(DEBUG) << "Using new AsyncClient";
         std::cerr << "DEBUG: ClientConfiguration: RUNAI_STREAMER_GCS_USE_ASYNC_CLIENT is TRUE" << std::endl;
 
-        // Use the calculated max_concurrency to set the number of gRPC channels (sockets)
-        // because gRPC channels are heavier than simple HTTP connections.
-        int num_channels = std::max(1u, max_concurrency); 
+        // Since we are creating multiple GCSClient instances (one per worker), and each
+        // now has its own AsyncClient, we should limit the number of channels per AsyncClient
+        // to avoid exhausting file descriptors. 1 channel per client * max_concurrency clients
+        // results in max_concurrency total channels, which is the intended behavior.
+        int num_channels = 1;
         options.set<google::cloud::GrpcNumChannelsOption>(num_channels);
         
         std::cerr << "DEBUG: Setting GrpcNumChannelsOption to " << num_channels << std::endl;

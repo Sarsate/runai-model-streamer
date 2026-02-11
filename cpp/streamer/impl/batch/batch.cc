@@ -176,7 +176,8 @@ void Batch::request_async_read(Reader * reader, std::atomic<bool> & stopped)
             handle_task_response(common::ResponseCode::Success, &task);
             continue;
         }
-        std::cerr << "DEBUG: Calling reader->async_read for task " << task.info.global_id << std::endl;
+        std::cerr << "DEBUG: Calling reader->async_read for task " << task.info.global_id 
+                  << " range=[" << range.start << ", " << range.size << "]" << std::endl;
         reader->async_read(object_storage_params, task.info.global_id, range, dst);
     }
 }

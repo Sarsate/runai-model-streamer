@@ -107,7 +107,8 @@ common::backend_api::ResponseCode_t obj_request_read(common::backend_api::Object
                                                      char* destination_buffer,
                                                      common::backend_api::ObjectRequestId_t request_id)
 {
-    std::cerr << "DEBUG: obj_request_read called for request " << request_id << std::endl;
+    std::cerr << "DEBUG: obj_request_read called for request " << request_id 
+              << " range=[" << range.offset << ", " << range.length << "]" << std::endl;
     try
     {
         if (!client_handle)

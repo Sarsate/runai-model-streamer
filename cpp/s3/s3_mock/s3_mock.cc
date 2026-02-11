@@ -149,6 +149,8 @@ common::backend_api::ResponseCode_t obj_request_read(
     char* destination_buffer,
     common::backend_api::ObjectRequestId_t request_id)
 {
+    // std::cerr << "DEBUG: obj_request_read mock called for request " << request_id 
+    //           << " range=[" << range.offset << ", " << range.length << "]" << std::endl;
     const auto guard = std::unique_lock<std::mutex>(__mutex);
 
     if (!__mock_clients.count(client_handle) || __mock_unused.count(client_handle))
