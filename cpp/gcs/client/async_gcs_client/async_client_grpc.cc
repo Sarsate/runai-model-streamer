@@ -13,22 +13,10 @@
 namespace runai::llm::streamer::impl::gcs
 {
 
-static std::shared_ptr<google::cloud::storage_experimental::AsyncClient> global_client;
-static std::once_flag client_init_flag;
-
-std::shared_ptr<google::cloud::storage_experimental::AsyncClient> AsyncClientGrpc::GetClient(const ClientConfiguration& config)
-{
-    std::call_once(client_init_flag, [&config]() {
-        LOG(DEBUG) << "Initializing Global AsyncClient";
-        global_client = std::make_shared<google::cloud::storage_experimental::AsyncClient>(config.options);
-    });
-    return global_client;
-}
-
 AsyncClientGrpc::AsyncClientGrpc(const ClientConfiguration& config)
 {
-    LOG(DEBUG) << "Initializing AsyncClientGrpc instance";
-    _client = GetClient(config);
+    LOG(DEBUG) << "Initializing AsyncClientGrpc instance with dedicated AsyncClient";
+    _client = std::make_shared<google::cloud::storage_experimental::AsyncClient>(config.options);
 }
 
 AsyncClientGrpc::~AsyncClientGrpc() = default;

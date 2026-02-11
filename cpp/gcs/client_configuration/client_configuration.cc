@@ -125,20 +125,25 @@ ClientConfiguration::ClientConfiguration()
         LOG(DEBUG) << "Using new AsyncClient";
         // std::cerr << "DEBUG: ClientConfiguration: RUNAI_STREAMER_GCS_USE_ASYNC_CLIENT is TRUE" << std::endl;
 
-        // Use the explicit concurrency setting for the global client configuration.
-        // max_concurrency is calculated inversely for the old client (higher concurrency -> lower per-client limit).
-        // For the new global client, we want capacity proportional to the number of workers.
-        int num_channels = std::max(1UL, worker_concurrency);
+        // For the new global client (or per-worker client), we want to partition the 
+        // global resource budget among the workers.
+        // If concurrency is 1, it gets the full budget.
+        // If concurrency is 20, each worker gets a slice.
+        
+        int target_global_channels = 24;
+        int target_global_threads = 96;
+
+        int num_channels = std::max(1, target_global_channels / (int)worker_concurrency);
         options.set<google::cloud::GrpcNumChannelsOption>(num_channels);
 
-        // Scale background threads similarly.
-        // Ensure at least 8 threads, or match worker concurrency if higher.
-        // This prevents starvation at high concurrency (e.g., 20 workers -> 20 threads).
-        int num_threads = std::max(8UL, worker_concurrency);
-        options.set<google::cloud::GrpcBackgroundThreadPoolSizeOption>(96);
+        // Ensure at least 8 threads per worker to prevent starvation, 
+        // but otherwise scale down from the global budget.
+        int num_threads = std::max(8, target_global_threads / (int)worker_concurrency);
+        options.set<google::cloud::GrpcBackgroundThreadPoolSizeOption>(num_threads);
 
         LOG(DEBUG) << "Setting GrpcNumChannelsOption to " << num_channels 
-                   << " and GrpcBackgroundThreadPoolSizeOption to " << num_threads;
+                   << " and GrpcBackgroundThreadPoolSizeOption to " << num_threads
+                   << " (Worker Concurrency: " << worker_concurrency << ")";
     }
     // std::cerr << "DEBUG: ClientConfiguration constructor finished" << std::endl;
 }
