@@ -131,6 +131,9 @@ ClientConfiguration::ClientConfiguration()
         int num_channels = 1;
         options.set<google::cloud::GrpcNumChannelsOption>(num_channels);
         
+        // Limit background threads per client to prevent thread explosion (50 clients * N threads)
+        options.set<google::cloud::GrpcBackgroundThreadPoolSizeOption>(1);
+        
         // std::cerr << "DEBUG: Setting GrpcNumChannelsOption to " << num_channels << std::endl;
     }
     // std::cerr << "DEBUG: ClientConfiguration constructor finished" << std::endl;
