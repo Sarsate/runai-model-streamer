@@ -70,6 +70,7 @@ void Workload::execute(std::atomic<bool> & stopped)
     // create reader
     if (is_object_storage())
     {
+        std::cerr << "DEBUG: Workload::execute calling async_read (is_object_storage=true)" << std::endl;
         async_read(stopped);
     }
     else
@@ -112,6 +113,17 @@ void Workload::async_read(std::atomic<bool> & stopped)
 
         auto s3_client = std::make_shared<common::s3::S3ClientWrapper>(_batches_by_file_index.begin()->second.object_storage_params);
         _reader = std::make_shared<S3>(s3_client, *config);
+
+        // Pre-open all files to maximize concurrency and reduce startup latency
+        // Collect all paths first
+        std::vector<std::string> paths;
+        paths.reserve(_batches_by_file_index.size());
+        for (auto & [file_index, batch] : _batches_by_file_index)
+        {
+            paths.push_back(batch.path);
+        }
+        std::cerr << "DEBUG: Workload calling PreOpen for " << paths.size() << " files" << std::endl;
+        _reader->PreOpen(paths);
 
         unsigned requested_batches = 0;
         for (auto & [file_index, batch] : _batches_by_file_index)

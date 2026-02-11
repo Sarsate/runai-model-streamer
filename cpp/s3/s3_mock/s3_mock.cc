@@ -242,6 +242,14 @@ common::backend_api::ResponseCode_t obj_wait_for_completions(common::backend_api
     return r;
 }
 
+common::backend_api::ResponseCode_t obj_pre_open(
+    common::backend_api::ObjectClientHandle_t client_handle,
+    const char** paths,
+    unsigned int num_paths)
+{
+    return common::ResponseCode::Success;
+}
+
 int runai_mock_s3_clients()
 {
     const auto guard = std::unique_lock<std::mutex>(__mutex);

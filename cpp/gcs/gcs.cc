@@ -168,4 +168,34 @@ common::backend_api::ResponseCode_t obj_wait_for_completions(common::backend_api
     return common::ResponseCode::UnknownError;
 }
 
+common::backend_api::ResponseCode_t obj_pre_open(
+    common::backend_api::ObjectClientHandle_t client_handle,
+    const char** paths,
+    unsigned int num_paths)
+{
+    std::cerr << "DEBUG: obj_pre_open called for " << num_paths << " paths" << std::endl;
+    try
+    {
+        if (!client_handle)
+        {
+            return common::ResponseCode::UnknownError;
+        }
+        auto ptr = static_cast<GCSClient *>(client_handle);
+        std::vector<std::string> paths_vec;
+        paths_vec.reserve(num_paths);
+        for (unsigned int i = 0; i < num_paths; ++i) {
+            if (paths[i]) {
+                paths_vec.emplace_back(paths[i]);
+            }
+        }
+        ptr->PreOpen(paths_vec);
+        return common::ResponseCode::Success;
+    }
+    catch (...)
+    {
+        std::cerr << "DEBUG ERROR: obj_pre_open exception" << std::endl;
+        return common::ResponseCode::UnknownError;
+    }
+}
+
 }; // namespace runai::llm::streamer::impl::gcs

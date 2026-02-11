@@ -103,6 +103,71 @@ common::ResponseCode write_stream_to_buffer(
     return common::ResponseCode::Success;
 }
 
+void GCSClient::PreOpen(const std::vector<std::string>& paths) {
+    if (!_client_config.use_new_async_client) {
+        return;
+    }
+
+    std::vector<google::cloud::future<void>> futures;
+
+    for (const auto& path : paths) {
+        const auto uri = common::s3::StorageUri(path);
+        std::string bucket_name(uri.bucket);
+        std::string path_name(uri.path);
+        std::string key = path;
+
+        // Check Cache (Shared Lock)
+        {
+            std::shared_lock<std::shared_timed_mutex> lock(_descriptors_mutex);
+            if (_descriptors.find(key) != _descriptors.end()) {
+                continue;
+            }
+        }
+
+        // Initiate Open
+        std::cerr << "DEBUG: PreOpen initiating Open for " << key << std::endl;
+        auto f = _new_async_client->Open(google::cloud::storage_experimental::BucketName(bucket_name), path_name)
+            .then([this, key](auto f) {
+                auto result = f.get();
+                std::shared_ptr<google::cloud::storage_experimental::ObjectDescriptor> descriptor;
+                
+                if (!result) {
+                    std::cerr << "DEBUG ERROR: PreOpen failed for " << key << ": " << result.status().message() << std::endl;
+                } else {
+                    descriptor = std::make_shared<google::cloud::storage_experimental::ObjectDescriptor>(*std::move(result));
+                }
+
+                {
+                    std::unique_lock<std::shared_timed_mutex> lock(_descriptors_mutex);
+                    if (descriptor) {
+                        _descriptors[key] = descriptor;
+                    }
+                    // Also handle any pending opens that might have been queued by async_read
+                    // in a race condition (though Workload structure avoids this)
+                    auto it = _pending_opens.find(key);
+                    if (it != _pending_opens.end()) {
+                        auto callbacks = std::move(it->second);
+                        _pending_opens.erase(it);
+                        lock.unlock(); // Unlock before callbacks
+                        for (const auto& cb : callbacks) {
+                            cb(descriptor);
+                        }
+                    }
+                }
+            });
+        
+        futures.push_back(std::move(f));
+    }
+
+    if (!futures.empty()) {
+        std::cerr << "DEBUG: Waiting for " << futures.size() << " PreOpen operations to complete..." << std::endl;
+        for (auto& f : futures) {
+            f.get();
+        }
+        std::cerr << "DEBUG: All PreOpen operations completed." << std::endl;
+    }
+}
+
 GCSClient::~GCSClient() {
     std::cerr << "DEBUG: GCSClient destructor called" << std::endl;
 }
@@ -200,6 +265,19 @@ common::ResponseCode GCSClient::async_read(const char* path, common::backend_api
                             destination_buffer, range.length, request_id, _responder, pending_chunks, is_success);
         };
 
+        // Optimization: Lock-free check.
+        // Since we PreOpen and Wait for all files in the workload before starting async_read,
+        // the _descriptors map should be populated and immutable (for these keys) during this phase.
+        // This avoids lock contention in the high-frequency read loop.
+        {
+            auto it = _descriptors.find(key);
+            if (it != _descriptors.end()) {
+                trigger_read(it->second);
+                return _stop ? common::ResponseCode::FinishedError : common::ResponseCode::Success;
+            }
+        }
+
+        // Fallback to locking mechanism if not found (e.g. if PreOpen failed or wasn't called)
         {
             // 1. Check Cache (Shared Lock)
             std::shared_lock<std::shared_timed_mutex> lock(_descriptors_mutex);

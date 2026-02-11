@@ -167,6 +167,7 @@ common::ResponseCode Streamer::async_request(
     {
         if (workload.size() > 0)
         {
+            std::cerr << "DEBUG: Streamer pushing workload to pool. Size: " << workload.size() << std::endl;
             LOG(DEBUG) << "sending workload to worker with batches " << workload.size();
 
             _pool.push(std::move(workload));
