@@ -40,15 +40,13 @@ void AsyncClientGrpc::Stop()
 
 void AsyncClientGrpc::PreOpen(const std::vector<std::string>& paths)
 {
-    std::vector<google::cloud::future<void>> futures;
-
     for (const auto& path : paths) {
         const auto uri = common::s3::StorageUri(path);
         std::string bucket_name(uri.bucket);
         std::string path_name(uri.path);
         std::string key = path;
 
-        // Check Cache (Shared Lock)
+        // 1. Check Cache (Shared Lock)
         {
             std::shared_lock<std::shared_timed_mutex> lock(_descriptors_mutex);
             if (_descriptors.find(key) != _descriptors.end()) {
@@ -56,8 +54,29 @@ void AsyncClientGrpc::PreOpen(const std::vector<std::string>& paths)
             }
         }
 
-        // Initiate Open
-        auto f = _client->Open(google::cloud::storage_experimental::BucketName(bucket_name), path_name)
+        // 2. Check/Add to Pending Opens (Exclusive Lock)
+        std::unique_lock<std::shared_timed_mutex> lock(_descriptors_mutex);
+        
+        // Double check cache
+        if (_descriptors.find(key) != _descriptors.end()) {
+            continue;
+        }
+
+        auto& pending = _pending_opens[key];
+        bool is_first_request = pending.empty();
+        
+        // Add a dummy callback so subsequent Reads see this as "in progress"
+        pending.push_back([](std::shared_ptr<google::cloud::storage_experimental::ObjectDescriptor>){});
+
+        if (!is_first_request) {
+            // Open already initiated by Read or another PreOpen
+            continue;
+        }
+
+        lock.unlock();
+
+        // 3. Initiate Open (Async)
+        _client->Open(google::cloud::storage_experimental::BucketName(bucket_name), path_name)
             .then([this, key](auto f) {
                 auto result = f.get();
                 std::shared_ptr<google::cloud::storage_experimental::ObjectDescriptor> descriptor;
@@ -68,32 +87,25 @@ void AsyncClientGrpc::PreOpen(const std::vector<std::string>& paths)
                     descriptor = std::make_shared<google::cloud::storage_experimental::ObjectDescriptor>(*std::move(result));
                 }
     
+                // 4. Complete and Notify
+                std::vector<std::function<void(std::shared_ptr<google::cloud::storage_experimental::ObjectDescriptor>)>> callbacks;
                 {
                     std::unique_lock<std::shared_timed_mutex> lock(_descriptors_mutex);
                     if (descriptor) {
                         _descriptors[key] = descriptor;
                     }
-                    // Also handle any pending opens that might have been queued by Read
-                    // in a race condition
+                    
                     auto it = _pending_opens.find(key);
                     if (it != _pending_opens.end()) {
-                        auto callbacks = std::move(it->second);
+                        callbacks = std::move(it->second);
                         _pending_opens.erase(it);
-                        lock.unlock(); // Unlock before callbacks
-                        for (const auto& cb : callbacks) {
-                            cb(descriptor);
-                        }
                     }
                 }
+                
+                for (const auto& cb : callbacks) {
+                    cb(descriptor);
+                }
             });
-        
-        futures.push_back(std::move(f));
-    }
-    
-    if (!futures.empty()) {
-        for (auto& f : futures) {
-            f.get();
-        }
     }
 }
 
@@ -183,18 +195,8 @@ common::ResponseCode AsyncClientGrpc::Read(
                         destination_buffer, range.length, request_id, responder, pending_chunks, is_success);
     };
 
-    // Optimization: Lock-free check.
+    // 1. Check Cache (Shared Lock)
     {
-        auto it = _descriptors.find(key);
-        if (it != _descriptors.end()) {
-            trigger_read(it->second);
-            return _stop ? common::ResponseCode::FinishedError : common::ResponseCode::Success;
-        }
-    }
-
-    // Fallback to locking mechanism
-    {
-        // 1. Check Cache (Shared Lock)
         std::shared_lock<std::shared_timed_mutex> lock(_descriptors_mutex);
         auto it = _descriptors.find(key);
         if (it != _descriptors.end()) {
