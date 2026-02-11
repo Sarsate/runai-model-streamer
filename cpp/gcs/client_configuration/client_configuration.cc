@@ -130,10 +130,11 @@ ClientConfiguration::ClientConfiguration()
         // For the new global client, we want capacity proportional to the number of workers.
         int num_channels = std::max(1UL, worker_concurrency);
         options.set<google::cloud::GrpcNumChannelsOption>(num_channels);
-        
+
         // Scale background threads similarly.
-        options.set<google::cloud::GrpcBackgroundThreadPoolSizeOption>(num_channels);
-        
+        options.set<google::cloud::GrpcBackgroundThreadPoolSizeOption>(
+            96 / num_channels);
+
         LOG(DEBUG) << "Setting GrpcNumChannelsOption and GrpcBackgroundThreadPoolSizeOption to " << num_channels;
     }
     // std::cerr << "DEBUG: ClientConfiguration constructor finished" << std::endl;
