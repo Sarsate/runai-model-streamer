@@ -41,6 +41,8 @@ ClientConfiguration::ClientConfiguration()
     check_env("RUNAI_STREAMER_GCS_USE_ASYNC_CLIENT");
 
     const auto max_connections = utils::getenv<unsigned long>("RUNAI_STREAMER_S3_MAX_CONNECTIONS", 0);
+    unsigned long worker_concurrency = utils::getenv<unsigned long>("RUNAI_STREAMER_CONCURRENCY", 8UL);
+
     if (max_connections) {
         max_concurrency = max_connections;
     } else {
@@ -48,9 +50,8 @@ ClientConfiguration::ClientConfiguration()
         // Use at least 8 threads if hardware_concurrency cannot be computed.
         LOG(SPAM) << "Hardware concurrency detected: " << nprocs;
         unsigned default_max_concurrency = nprocs == 0 ? 8U : 1U;
-        unsigned worker_concurrency = utils::getenv<unsigned long>("RUNAI_STREAMER_CONCURRENCY", 8UL);
         LOG(SPAM) << "Streamer worker concurrency: " << worker_concurrency;
-        max_concurrency = std::max(default_max_concurrency, nprocs * 2 / worker_concurrency);
+        max_concurrency = std::max(static_cast<unsigned long>(default_max_concurrency), nprocs * 2 / worker_concurrency);
     }
     LOG(DEBUG) << "GCS per-client concurrency is set to: " << max_concurrency;
 
@@ -124,17 +125,16 @@ ClientConfiguration::ClientConfiguration()
         LOG(DEBUG) << "Using new AsyncClient";
         // std::cerr << "DEBUG: ClientConfiguration: RUNAI_STREAMER_GCS_USE_ASYNC_CLIENT is TRUE" << std::endl;
 
-        // Since we are creating multiple GCSClient instances (one per worker), and each
-        // now has its own AsyncClient, we should limit the number of channels per AsyncClient
-        // to avoid exhausting file descriptors. 1 channel per client * max_concurrency clients
-        // results in max_concurrency total channels, which is the intended behavior.
-        int num_channels = 2;
+        // Use the explicit concurrency setting for the global client configuration.
+        // max_concurrency is calculated inversely for the old client (higher concurrency -> lower per-client limit).
+        // For the new global client, we want capacity proportional to the number of workers.
+        int num_channels = std::max(1UL, worker_concurrency);
         options.set<google::cloud::GrpcNumChannelsOption>(num_channels);
         
-        // Limit background threads per client to prevent thread explosion (50 clients * N threads)
-        options.set<google::cloud::GrpcBackgroundThreadPoolSizeOption>(2);
+        // Scale background threads similarly.
+        options.set<google::cloud::GrpcBackgroundThreadPoolSizeOption>(num_channels);
         
-        // std::cerr << "DEBUG: Setting GrpcNumChannelsOption to " << num_channels << std::endl;
+        LOG(DEBUG) << "Setting GrpcNumChannelsOption and GrpcBackgroundThreadPoolSizeOption to " << num_channels;
     }
     // std::cerr << "DEBUG: ClientConfiguration constructor finished" << std::endl;
 }

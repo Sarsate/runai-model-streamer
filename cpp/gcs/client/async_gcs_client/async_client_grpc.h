@@ -37,6 +37,8 @@ public:
     void Stop();
 
 private:
+    static std::shared_ptr<google::cloud::storage_experimental::AsyncClient> GetClient(const ClientConfiguration& config);
+
     void StreamToBuffer(
         google::cloud::storage_experimental::AsyncReader reader,
         google::cloud::storage_experimental::AsyncToken token,
@@ -47,7 +49,7 @@ private:
         std::shared_ptr<std::atomic<unsigned>> pending_chunks,
         std::shared_ptr<std::atomic<bool>> is_success);
 
-    std::unique_ptr<google::cloud::storage_experimental::AsyncClient> _client;
+    std::shared_ptr<google::cloud::storage_experimental::AsyncClient> _client;
     
     std::shared_timed_mutex _descriptors_mutex;
     std::map<std::string, std::shared_ptr<google::cloud::storage_experimental::ObjectDescriptor>> _descriptors;
