@@ -40,73 +40,7 @@ void AsyncClientGrpc::Stop()
 
 void AsyncClientGrpc::PreOpen(const std::vector<std::string>& paths)
 {
-    for (const auto& path : paths) {
-        const auto uri = common::s3::StorageUri(path);
-        std::string bucket_name(uri.bucket);
-        std::string path_name(uri.path);
-        std::string key = path;
-
-        // 1. Check Cache (Shared Lock)
-        {
-            std::shared_lock<std::shared_timed_mutex> lock(_descriptors_mutex);
-            if (_descriptors.find(key) != _descriptors.end()) {
-                continue;
-            }
-        }
-
-        // 2. Check/Add to Pending Opens (Exclusive Lock)
-        std::unique_lock<std::shared_timed_mutex> lock(_descriptors_mutex);
-        
-        // Double check cache
-        if (_descriptors.find(key) != _descriptors.end()) {
-            continue;
-        }
-
-        auto& pending = _pending_opens[key];
-        bool is_first_request = pending.empty();
-        
-        // Add a dummy callback so subsequent Reads see this as "in progress"
-        pending.push_back([](std::shared_ptr<google::cloud::storage_experimental::ObjectDescriptor>){});
-
-        if (!is_first_request) {
-            // Open already initiated by Read or another PreOpen
-            continue;
-        }
-
-        lock.unlock();
-
-        // 3. Initiate Open (Async)
-        _client->Open(google::cloud::storage_experimental::BucketName(bucket_name), path_name)
-            .then([this, key](auto f) {
-                auto result = f.get();
-                std::shared_ptr<google::cloud::storage_experimental::ObjectDescriptor> descriptor;
-                
-                if (!result) {
-                    LOG(ERROR) << "PreOpen failed for " << key << ": " << result.status().message();
-                } else {
-                    descriptor = std::make_shared<google::cloud::storage_experimental::ObjectDescriptor>(*std::move(result));
-                }
-    
-                // 4. Complete and Notify
-                std::vector<std::function<void(std::shared_ptr<google::cloud::storage_experimental::ObjectDescriptor>)>> callbacks;
-                {
-                    std::unique_lock<std::shared_timed_mutex> lock(_descriptors_mutex);
-                    if (descriptor) {
-                        _descriptors[key] = descriptor;
-                    }
-                    
-                    auto it = _pending_opens.find(key);
-                    if (it != _pending_opens.end()) {
-                        callbacks = std::move(it->second);
-                        _pending_opens.erase(it);
-                    }
-                }
-                
-                for (const auto& cb : callbacks) {
-                    cb(descriptor);
-                }
-            });
-    }
+    // No-op. Read() handles opening.
 }
 
 void AsyncClientGrpc::StreamToBuffer(
@@ -122,7 +56,7 @@ void AsyncClientGrpc::StreamToBuffer(
     reader.Read(std::move(token)).then(
         [this, reader = std::move(reader), buffer, remaining_in_chunk, request_id, responder, pending_chunks, is_success]
         (auto f) mutable {
-            if (_stop) return; // Stop processing if requested
+            if (_stop) return; 
 
             auto result = f.get();
             if (!result) {
@@ -135,7 +69,7 @@ void AsyncClientGrpc::StreamToBuffer(
 
             auto& payload = result->first;
             auto& next_token = result->second;
-
+            
             size_t bytes_copied = 0;
             for (const auto& chunk : payload.contents()) {
                 if (bytes_copied + chunk.size() > remaining_in_chunk) {
@@ -164,6 +98,7 @@ void AsyncClientGrpc::StreamToBuffer(
                 }
 
                 if (pending_chunks->fetch_sub(1) == 1) {
+                    LOG(DEBUG) << "Request " << request_id << " completed successfully.";
                     responder->push({request_id, common::ResponseCode::Success});
                 }
             }
@@ -186,95 +121,35 @@ common::ResponseCode AsyncClientGrpc::Read(
     std::string path_name(uri.path);
     std::string key = path; 
 
+    LOG(DEBUG) << "Starting Read for request " << request_id << " range " << range.offset << "-" << range.length;
+
     // Helper to trigger read on a descriptor
     auto trigger_read = [this, range, destination_buffer, request_id, responder, pending_chunks, is_success](
         std::shared_ptr<google::cloud::storage_experimental::ObjectDescriptor> descriptor) {
+            
+            LOG(DEBUG) << "Triggering Read on descriptor for request " << request_id;
             auto read_result = descriptor->Read(range.offset, range.length);
             
             StreamToBuffer(std::move(read_result.first), std::move(read_result.second), 
                         destination_buffer, range.length, request_id, responder, pending_chunks, is_success);
     };
 
-    // 1. Check Cache (Shared Lock)
-    {
-        std::shared_lock<std::shared_timed_mutex> lock(_descriptors_mutex);
-        auto it = _descriptors.find(key);
-        if (it != _descriptors.end()) {
-            auto descriptor = it->second;
-            lock.unlock();
-            trigger_read(descriptor);
-            return _stop ? common::ResponseCode::FinishedError : common::ResponseCode::Success;
-        }
-    }
-
-    // Cache Miss - Upgrade to Exclusive Lock
-    std::unique_lock<std::shared_timed_mutex> lock(_descriptors_mutex);
-
-    // 1b. Double Check Cache (Exclusive Lock)
-    auto it = _descriptors.find(key);
-    if (it != _descriptors.end()) {
-        auto descriptor = it->second;
-        lock.unlock();
-        trigger_read(descriptor);
-        return _stop ? common::ResponseCode::FinishedError : common::ResponseCode::Success;
-    }
-
-    // 2. Check/Add to Pending Opens: Coalesce requests for the same object.
-    auto callback = [trigger_read, responder, request_id, is_success](std::shared_ptr<google::cloud::storage_experimental::ObjectDescriptor> descriptor) {
-        if (!descriptor) {
-            // Open failed, fail this specific request
-            if (is_success->exchange(false)) {
-                responder->push({request_id, common::ResponseCode::FileAccessError});
-            }
-            return;
-        }
-        trigger_read(descriptor);
-    };
-
-    auto& pending = _pending_opens[key];
-    bool is_first_request = pending.empty();
-    pending.push_back(std::move(callback));
-
-    if (!is_first_request) {
-        // An Open is already in progress. This request is now queued.
-        return _stop ? common::ResponseCode::FinishedError : common::ResponseCode::Success;
-    }
-
-    lock.unlock();
-
-    // 3. Initiate Open
     _client->Open(google::cloud::storage_experimental::BucketName(bucket_name), path_name)
-        .then([this, key, request_id](auto f) {
+        .then([this, key, request_id, trigger_read, responder, is_success](auto f) {
             auto result = f.get();
             std::shared_ptr<google::cloud::storage_experimental::ObjectDescriptor> descriptor;
             
             if (!result) {
                 LOG(ERROR) << "Failed to open object descriptor for request " << request_id << ": " << result.status().message();
-                // descriptor remains null
-            } else {
-                descriptor = std::make_shared<google::cloud::storage_experimental::ObjectDescriptor>(*std::move(result));
-            }
+                if (is_success->exchange(false)) {
+                    responder->push({request_id, common::ResponseCode::FileAccessError});
+                }
+                return;
+            } 
 
-            // 4. Fan-Out: Execute all queued callbacks.
-            std::vector<std::function<void(std::shared_ptr<google::cloud::storage_experimental::ObjectDescriptor>)>> callbacks;
-            {
-                std::unique_lock<std::shared_timed_mutex> lock(_descriptors_mutex);
-                
-                if (descriptor) {
-                    _descriptors[key] = descriptor; // Cache the successful descriptor
-                }
-                
-                // Retrieve and remove the pending callbacks for this key
-                auto it = _pending_opens.find(key);
-                if (it != _pending_opens.end()) {
-                    callbacks = std::move(it->second);
-                    _pending_opens.erase(it);
-                }
-            }
-            
-            for (const auto& cb : callbacks) {
-                cb(descriptor);
-            }
+            LOG(DEBUG) << "Open successful for request " << request_id;
+            descriptor = std::make_shared<google::cloud::storage_experimental::ObjectDescriptor>(*std::move(result));
+            trigger_read(descriptor);
         });
 
     return _stop ? common::ResponseCode::FinishedError : common::ResponseCode::Success;
