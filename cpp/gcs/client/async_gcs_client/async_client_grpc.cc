@@ -125,6 +125,13 @@ void AsyncClientGrpc::StreamToBuffer(
             auto& next_token = result->second;
             
             size_t bytes_copied = 0;
+            if (remaining_in_chunk > 0 && buffer != nullptr) {
+                 // Log start of stream data for this request (approximate)
+                 // We can't easily track "start" across recursions without extra state, 
+                 // but we can log if this is a substantial chunk.
+                 // Better: Log whenever we complete a request.
+            }
+
             for (const auto& chunk : payload.contents()) {
                 if (bytes_copied + chunk.size() > remaining_in_chunk) {
                     LOG(ERROR) << "StreamToBuffer overflow for request " << request_id;
@@ -152,6 +159,7 @@ void AsyncClientGrpc::StreamToBuffer(
                 }
 
                 if (pending_chunks->fetch_sub(1) == 1) {
+                    LOG(DEBUG) << "Stream finished for request " << request_id << " (" << remaining_in_chunk << " bytes)";
                     responder->push({request_id, common::ResponseCode::Success});
                 }
             }
