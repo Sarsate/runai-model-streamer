@@ -29,6 +29,8 @@
 
 #include <shared_mutex>
 
+#include <unistd.h> // For getpid()
+
 namespace runai::llm::streamer::impl::gcs
 {
 
@@ -43,19 +45,19 @@ GCSClient::GCSClient(const common::backend_api::ObjectClientConfig_t& config) :
     _responder(nullptr),
     _chunk_bytesize(config.default_storage_chunk_size)
 {
-    std::cerr << "DEBUG: GCSClient constructor called" << std::endl;
+    std::cerr << "DEBUG: [PID=" << getpid() << "] GCSClient constructor called" << std::endl;
     if (_client_config.use_new_async_client) {
         std::unique_lock<std::shared_timed_mutex> lock(_descriptors_mutex);
         if (!_new_async_client) {
-            std::cerr << "DEBUG: Initializing SHARED AsyncClient" << std::endl;
+            std::cerr << "DEBUG: [PID=" << getpid() << "] Initializing SHARED AsyncClient" << std::endl;
             _new_async_client = std::make_unique<google::cloud::storage_experimental::AsyncClient>(_client_config.options);
         }
     } else {
         std::cerr << "DEBUG: Initializing LEGACY AsyncGcsClient" << std::endl;
         _client = std::make_unique<AsyncGcsClient>(_client_config.options, _client_config.max_concurrency);
     }
-    std::cout << "DEBUG: Custom Run:ai Streamer build is active!" << std::endl;
-    std::cerr << "DEBUG: GCSClient constructor finished" << std::endl;
+    // std::cout << "DEBUG: Custom Run:ai Streamer build is active!" << std::endl;
+    // std::cerr << "DEBUG: GCSClient constructor finished" << std::endl;
 }
 
 bool GCSClient::verify_credentials(const common::backend_api::ObjectClientConfig_t & config) const
