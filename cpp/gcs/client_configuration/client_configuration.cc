@@ -1,6 +1,7 @@
 #include "gcs/client_configuration/client_configuration.h"
 
 #include "google/cloud/storage/client.h"
+#include "google/cloud/grpc_options.h"
 
 #include "common/exception/exception.h"
 #include "common/response_code/response_code.h"
@@ -122,6 +123,13 @@ ClientConfiguration::ClientConfiguration()
     if (use_new_async_client) {
         LOG(DEBUG) << "Using new AsyncClient";
         std::cerr << "DEBUG: ClientConfiguration: RUNAI_STREAMER_GCS_USE_ASYNC_CLIENT is TRUE" << std::endl;
+
+        // Use the calculated max_concurrency to set the number of gRPC channels (sockets)
+        // because gRPC channels are heavier than simple HTTP connections.
+        int num_channels = std::max(1u, max_concurrency); 
+        options.set<google::cloud::GrpcNumChannelsOption>(num_channels);
+        
+        std::cerr << "DEBUG: Setting GrpcNumChannelsOption to " << num_channels << std::endl;
     }
     std::cerr << "DEBUG: ClientConfiguration constructor finished" << std::endl;
 }
