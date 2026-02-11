@@ -58,7 +58,7 @@ common::ResponseCode S3::async_response(std::vector<common::backend_api::Respons
 }
 
 void S3::PreOpen(const std::vector<std::string>& paths) {
-    std::cerr << "DEBUG: S3::PreOpen called with " << paths.size() << " paths" << std::endl;
+    // std::cerr << "DEBUG: S3::PreOpen called with " << paths.size() << " paths" << std::endl;
     _client->PreOpen(paths);
 }
 

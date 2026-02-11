@@ -161,8 +161,8 @@ common::backend_api::ResponseCode_t S3Client::async_read(const char* path,
                                                          char* destination_buffer,
                                                          common::backend_api::ObjectRequestId_t request_id)
 {
-    std::cerr << "DEBUG: S3Client::async_read called for request " << request_id 
-              << " range=[" << range.offset << ", " << range.length << "]" << std::endl;
+    // std::cerr << "DEBUG: S3Client::async_read called for request " << request_id 
+    //           << " range=[" << range.offset << ", " << range.length << "]" << std::endl;
     if (_responder == nullptr)
     {
         _responder = std::make_shared<Responder>(1);

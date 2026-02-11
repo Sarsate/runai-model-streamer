@@ -236,8 +236,8 @@ void * S3ClientWrapper::create_client(const Params & params)
 
 ResponseCode S3ClientWrapper::async_read(const Params & params, common::backend_api::ObjectRequestId_t request_id, const Range & range, char * buffer)
 {
-    std::cerr << "DEBUG: S3ClientWrapper::async_read called for request " << request_id 
-              << " range=[" << range.start << ", " << range.size << "]" << std::endl;
+    // std::cerr << "DEBUG: S3ClientWrapper::async_read called for request " << request_id 
+    //           << " range=[" << range.start << ", " << range.size << "]" << std::endl;
     auto s3_async_read_ = _backend_handle->dylib_ptr->dlsym<ResponseCode(*)(common::backend_api::ObjectClientHandle_t, const char*, common::backend_api::ObjectRange_t, char*, common::backend_api::ObjectRequestId_t)>("obj_request_read");
     return s3_async_read_(_s3_client, params.uri->uri.c_str(), range.to_backend_api_range(), buffer, request_id);
     return common::ResponseCode::Success;
@@ -274,18 +274,18 @@ common::backend_api::ObjectShutdownPolicy_t S3ClientWrapper::get_backend_shutdow
 void S3ClientWrapper::PreOpen(const std::vector<std::string>& paths) {
     if (paths.empty()) return;
     try {
-        std::cerr << "DEBUG: S3ClientWrapper::PreOpen loading symbol..." << std::endl;
+        // std::cerr << "DEBUG: S3ClientWrapper::PreOpen loading symbol..." << std::endl;
         auto pre_open_ = _backend_handle->dylib_ptr->dlsym<ResponseCode(*)(common::backend_api::ObjectClientHandle_t, const char**, unsigned int)>("obj_pre_open");
         std::vector<const char*> c_paths;
         c_paths.reserve(paths.size());
         for (const auto& p : paths) {
             c_paths.push_back(p.c_str());
         }
-        std::cerr << "DEBUG: S3ClientWrapper::PreOpen calling backend..." << std::endl;
+        // std::cerr << "DEBUG: S3ClientWrapper::PreOpen calling backend..." << std::endl;
         pre_open_(_s3_client, c_paths.data(), static_cast<unsigned int>(c_paths.size()));
     } catch (...) {
         // Ignore errors in pre-open as it is an optimization
-        std::cerr << "DEBUG ERROR: S3ClientWrapper::PreOpen exception" << std::endl;
+        // std::cerr << "DEBUG ERROR: S3ClientWrapper::PreOpen exception" << std::endl;
         LOG(WARNING) << "Failed to pre-open paths";
     }
 }

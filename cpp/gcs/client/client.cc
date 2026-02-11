@@ -89,14 +89,14 @@ common::ResponseCode write_stream_to_buffer(
     stream.Close();
 
     if (bytes_received != bytesize) {
-        std::cerr << "DEBUG ERROR: GCS ReadObject request " << request_id 
-                  << " failed. Received " << bytes_received << " bytes, expected " << bytesize << "." << std::endl;
+        // std::cerr << "DEBUG ERROR: GCS ReadObject request " << request_id 
+        //           << " failed. Received " << bytes_received << " bytes, expected " << bytesize << "." << std::endl;
         return common::ResponseCode::FileAccessError;
     }
     if (stream.bad()) {
-        const auto & err = stream.status();
-        std::cerr << "DEBUG ERROR: GCS stream bad for request " << request_id 
-                  << ". Code: " << err.code() << ", Message: " << err.message() << std::endl;
+        // const auto & err = stream.status();
+        // std::cerr << "DEBUG ERROR: GCS stream bad for request " << request_id 
+        //           << ". Code: " << err.code() << ", Message: " << err.message() << std::endl;
         return common::ResponseCode::FileAccessError;
     }
 
@@ -124,52 +124,51 @@ void GCSClient::PreOpen(const std::vector<std::string>& paths) {
             }
         }
 
-        // Initiate Open
-        std::cerr << "DEBUG: PreOpen initiating Open for " << key << std::endl;
-        auto f = _new_async_client->Open(google::cloud::storage_experimental::BucketName(bucket_name), path_name)
-            .then([this, key](auto f) {
-                auto result = f.get();
-                std::shared_ptr<google::cloud::storage_experimental::ObjectDescriptor> descriptor;
-                
-                if (!result) {
-                    std::cerr << "DEBUG ERROR: PreOpen failed for " << key << ": " << result.status().message() << std::endl;
-                } else {
-                    descriptor = std::make_shared<google::cloud::storage_experimental::ObjectDescriptor>(*std::move(result));
-                }
-
-                {
-                    std::unique_lock<std::shared_timed_mutex> lock(_descriptors_mutex);
-                    if (descriptor) {
-                        _descriptors[key] = descriptor;
+            // Initiate Open
+            // std::cerr << "DEBUG: PreOpen initiating Open for " << key << std::endl;
+            auto f = _new_async_client->Open(google::cloud::storage_experimental::BucketName(bucket_name), path_name)
+                .then([this, key](auto f) {
+                    auto result = f.get();
+                    std::shared_ptr<google::cloud::storage_experimental::ObjectDescriptor> descriptor;
+                    
+                    if (!result) {
+                        // std::cerr << "DEBUG ERROR: PreOpen failed for " << key << ": " << result.status().message() << std::endl;
+                    } else {
+                        descriptor = std::make_shared<google::cloud::storage_experimental::ObjectDescriptor>(*std::move(result));
                     }
-                    // Also handle any pending opens that might have been queued by async_read
-                    // in a race condition (though Workload structure avoids this)
-                    auto it = _pending_opens.find(key);
-                    if (it != _pending_opens.end()) {
-                        auto callbacks = std::move(it->second);
-                        _pending_opens.erase(it);
-                        lock.unlock(); // Unlock before callbacks
-                        for (const auto& cb : callbacks) {
-                            cb(descriptor);
+        
+                    {
+                        std::unique_lock<std::shared_timed_mutex> lock(_descriptors_mutex);
+                        if (descriptor) {
+                            _descriptors[key] = descriptor;
+                        }
+                        // Also handle any pending opens that might have been queued by async_read
+                        // in a race condition (though Workload structure avoids this)
+                        auto it = _pending_opens.find(key);
+                        if (it != _pending_opens.end()) {
+                            auto callbacks = std::move(it->second);
+                            _pending_opens.erase(it);
+                            lock.unlock(); // Unlock before callbacks
+                            for (const auto& cb : callbacks) {
+                                cb(descriptor);
+                            }
                         }
                     }
-                }
-            });
-        
-        futures.push_back(std::move(f));
-    }
-
-    if (!futures.empty()) {
-        std::cerr << "DEBUG: Waiting for " << futures.size() << " PreOpen operations to complete..." << std::endl;
-        for (auto& f : futures) {
-            f.get();
+                });
+            
+            futures.push_back(std::move(f));
         }
-        std::cerr << "DEBUG: All PreOpen operations completed." << std::endl;
-    }
-}
+        
+        if (!futures.empty()) {
+            // std::cerr << "DEBUG: Waiting for " << futures.size() << " PreOpen operations to complete..." << std::endl;
+            for (auto& f : futures) {
+                f.get();
+            }
+            // std::cerr << "DEBUG: All PreOpen operations completed." << std::endl;
+        }}
 
 GCSClient::~GCSClient() {
-    std::cerr << "DEBUG: GCSClient destructor called" << std::endl;
+    // std::cerr << "DEBUG: GCSClient destructor called" << std::endl;
 }
 
 namespace {
@@ -187,7 +186,7 @@ namespace {
             (auto f) mutable {
                 auto result = f.get();
                 if (!result) {
-                    std::cerr << "DEBUG ERROR: StreamToBuffer failed for request " << request_id << ": " << result.status().message() << std::endl;
+                    // std::cerr << "DEBUG ERROR: StreamToBuffer failed for request " << request_id << ": " << result.status().message() << std::endl;
                     if (is_success->exchange(false)) {
                         responder->push({request_id, common::ResponseCode::FileAccessError});
                     }
@@ -200,7 +199,7 @@ namespace {
                 size_t bytes_copied = 0;
                 for (const auto& chunk : payload.contents()) {
                     if (bytes_copied + chunk.size() > remaining_in_chunk) {
-                        std::cerr << "DEBUG ERROR: StreamToBuffer overflow for request " << request_id << std::endl;
+                        // std::cerr << "DEBUG ERROR: StreamToBuffer overflow for request " << request_id << std::endl;
                         if (is_success->exchange(false)) {
                             responder->push({request_id, common::ResponseCode::FileAccessError});
                         }
@@ -216,8 +215,8 @@ namespace {
                                    request_id, responder, pending_chunks, is_success);
                 } else {
                     if (bytes_copied != remaining_in_chunk) {
-                        std::cerr << "DEBUG ERROR: StreamToBuffer incomplete read for request " << request_id 
-                                  << ". Expected " << remaining_in_chunk << ", got " << bytes_copied << std::endl;
+                        // std::cerr << "DEBUG ERROR: StreamToBuffer incomplete read for request " << request_id 
+                        //           << ". Expected " << remaining_in_chunk << ", got " << bytes_copied << std::endl;
                          if (is_success->exchange(false)) {
                             responder->push({request_id, common::ResponseCode::FileAccessError});
                         }
@@ -330,14 +329,14 @@ common::ResponseCode GCSClient::async_read(const char* path, common::backend_api
         lock.unlock();
 
         // 3. Initiate Open: We are the first request, so we trigger the Open.
-        std::cerr << "DEBUG: Cache miss. Initiating Open for " << key << std::endl;
+        // std::cerr << "DEBUG: Cache miss. Initiating Open for " << key << std::endl;
         _new_async_client->Open(google::cloud::storage_experimental::BucketName(bucket_name), path_name)
             .then([this, key, request_id](auto f) {
                 auto result = f.get();
                 std::shared_ptr<google::cloud::storage_experimental::ObjectDescriptor> descriptor;
                 
                 if (!result) {
-                    std::cerr << "DEBUG ERROR: Failed to open object descriptor for request " << request_id << ": " << result.status().message() << std::endl;
+                    // std::cerr << "DEBUG ERROR: Failed to open object descriptor for request " << request_id << ": " << result.status().message() << std::endl;
                     // descriptor remains null
                 } else {
                     descriptor = std::make_shared<google::cloud::storage_experimental::ObjectDescriptor>(*std::move(result));
@@ -360,7 +359,7 @@ common::ResponseCode GCSClient::async_read(const char* path, common::backend_api
                     }
                 }
                 
-                std::cerr << "DEBUG: Open finished for " << key << ". Dispatching to " << callbacks.size() << " waiting requests." << std::endl;
+                // std::cerr << "DEBUG: Open finished for " << key << ". Dispatching to " << callbacks.size() << " waiting requests." << std::endl;
                 for (const auto& cb : callbacks) {
                     cb(descriptor);
                 }
