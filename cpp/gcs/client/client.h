@@ -56,7 +56,7 @@ struct GCSClient : common::IClient
     std::unique_ptr<AsyncGcsClient> _client;
     
     // Shared resources per GCSClient instance
-    std::unique_ptr<google::cloud::storage_experimental::AsyncClient> _new_async_client;
+    static std::unique_ptr<google::cloud::storage_experimental::AsyncClient> _new_async_client;
     std::shared_timed_mutex _descriptors_mutex;
     std::map<std::string, std::shared_ptr<google::cloud::storage_experimental::ObjectDescriptor>> _descriptors;
     std::map<std::string, std::vector<std::function<void(std::shared_ptr<google::cloud::storage_experimental::ObjectDescriptor>)>>> _pending_opens;

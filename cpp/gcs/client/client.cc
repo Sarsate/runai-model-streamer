@@ -34,6 +34,10 @@
 namespace runai::llm::streamer::impl::gcs
 {
 
+// Define static members
+std::unique_ptr<google::cloud::storage_experimental::AsyncClient> GCSClient::_new_async_client;
+static std::once_flag _init_flag;
+
 GCSClient::GCSClient(const common::backend_api::ObjectClientConfig_t& config) :
     _stop(false),
     _responder(nullptr),
@@ -42,7 +46,9 @@ GCSClient::GCSClient(const common::backend_api::ObjectClientConfig_t& config) :
     // std::cerr << "DEBUG: [PID=" << getpid() << "] GCSClient constructor called" << std::endl;
     if (_client_config.use_new_async_client) {
         // std::cerr << "DEBUG: [PID=" << getpid() << "] Initializing AsyncClient" << std::endl;
-        _new_async_client = std::make_unique<google::cloud::storage_experimental::AsyncClient>(_client_config.options);
+        std::call_once(_init_flag, [&]() {
+            _new_async_client = std::make_unique<google::cloud::storage_experimental::AsyncClient>(_client_config.options);
+        });
     } else {
         // std::cerr << "DEBUG: Initializing LEGACY AsyncGcsClient" << std::endl;
         _client = std::make_unique<AsyncGcsClient>(_client_config.options, _client_config.max_concurrency);
