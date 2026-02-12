@@ -139,6 +139,7 @@ void AsyncClientGrpc::OnReadComplete(
         auto result = f.get();
         if (!result) {
             _active_reads--;
+            ReleaseReadPermit();
             LOG(ERROR) << "StreamToBuffer failed for request " << request_id << ": " << result.status().message() << ". Active reads: " << _active_reads;
             if (is_success->exchange(false)) {
                 responder->push({request_id, common::ResponseCode::FileAccessError});
@@ -165,6 +166,7 @@ void AsyncClientGrpc::OnReadComplete(
         for (const auto& chunk : payload.contents()) {
             if (bytes_copied + chunk.size() > remaining_in_chunk) {
                 _active_reads--;
+                ReleaseReadPermit();
                 LOG(ERROR) << "StreamToBuffer overflow for request " << request_id;
                 if (is_success->exchange(false)) {
                     responder->push({request_id, common::ResponseCode::FileAccessError});
@@ -183,6 +185,7 @@ void AsyncClientGrpc::OnReadComplete(
         } else {
             // Completion Logic
             _active_reads--;
+            ReleaseReadPermit();
             if (bytes_copied != remaining_in_chunk) {
                 LOG(ERROR) << "StreamToBuffer incomplete read for request " << request_id 
                            << ". Expected " << remaining_in_chunk << ", got " << bytes_copied
@@ -222,6 +225,16 @@ common::ResponseCode AsyncClientGrpc::Read(
     // Helper to trigger read on a descriptor
     auto trigger_read = [this, range, destination_buffer, request_id, responder, pending_chunks, is_success](
         std::shared_ptr<google::cloud::storage_experimental::ObjectDescriptor> descriptor) {
+            
+            // Limit concurrency
+            AcquireReadPermit();
+            if (_stop) {
+                if (is_success->exchange(false)) {
+                    responder->push({request_id, common::ResponseCode::FinishedError});
+                }
+                return;
+            }
+
             _active_reads++;
             auto read_result = descriptor->Read(range.offset, range.length);
             
@@ -320,6 +333,18 @@ common::ResponseCode AsyncClientGrpc::Read(
         });
 
     return _stop ? common::ResponseCode::FinishedError : common::ResponseCode::Success;
+}
+
+
+void AsyncClientGrpc::AcquireReadPermit() {
+    std::unique_lock<std::mutex> lock(_semaphore_mutex);
+    _semaphore_cv.wait(lock, [this] {
+        return _active_reads < _max_concurrent_reads || _stop;
+    });
+}
+
+void AsyncClientGrpc::ReleaseReadPermit() {
+    _semaphore_cv.notify_one();
 }
 
 void AsyncClientGrpc::Monitor() {

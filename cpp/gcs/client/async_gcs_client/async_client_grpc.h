@@ -71,6 +71,13 @@ private:
     std::atomic<int> _active_opens{0};
     std::atomic<int> _active_reads{0};
     std::atomic<int> _active_streams{0};
+
+    // Concurrency Control
+    int _max_concurrent_reads{64};
+    std::mutex _semaphore_mutex;
+    std::condition_variable _semaphore_cv;
+    void AcquireReadPermit();
+    void ReleaseReadPermit();
 };
 
 } // namespace runai::llm::streamer::impl::gcs
