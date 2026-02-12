@@ -9,6 +9,7 @@
 #include <shared_mutex>
 #include <thread>
 #include <condition_variable>
+#include <future>
 
 #include "google/cloud/storage/async/client.h"
 #include "google/cloud/storage/async/object_descriptor.h"
@@ -56,15 +57,14 @@ private:
 
     void ExecuteTask(ReadTask&& task, std::atomic<bool>& stopped);
 
+    std::shared_future<std::shared_ptr<google::cloud::storage_experimental::ObjectDescriptor>> TriggerOpen(const std::string& key, const std::string& bucket, const std::string& path);
     std::shared_ptr<google::cloud::storage_experimental::ObjectDescriptor> GetDescriptor(const std::string& key, const std::string& bucket, const std::string& path);
 
     std::shared_ptr<google::cloud::storage_experimental::AsyncClient> _client;
     
     std::shared_timed_mutex _descriptors_mutex;
     std::map<std::string, std::shared_ptr<google::cloud::storage_experimental::ObjectDescriptor>> _descriptors;
-    // We might not need pending opens map if we block on future in the thread pool,
-    // but PreOpen might still want to populate it asynchronously.
-    // For now, let's simplify: GetDescriptor manages the cache.
+    std::map<std::string, std::shared_future<std::shared_ptr<google::cloud::storage_experimental::ObjectDescriptor>>> _pending_opens;
 
     std::atomic<bool> _stop{false};
     utils::ThreadPool<ReadTask> _thread_pool;

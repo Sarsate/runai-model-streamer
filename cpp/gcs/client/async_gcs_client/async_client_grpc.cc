@@ -41,71 +41,72 @@ void AsyncClientGrpc::Stop()
     if (_monitor_thread.joinable()) {
         _monitor_thread.join();
     }
-    // ThreadPool destructor handles stopping threads
 }
 
 void AsyncClientGrpc::PreOpen(const std::vector<std::string>& paths)
 {
-    // PreOpen is now just a cache warmer.
-    // It initiates Open calls. If they finish before Read needs them, great.
-    // If not, Read will wait for them (or initiate its own).
+    // Fire-and-forget TriggerOpen to populate cache/pending map.
+    // This allows subsequent Reads to coalesce onto these operations.
     for (const auto& path : paths) {
         const auto uri = common::s3::StorageUri(path);
-        std::string bucket_name(uri.bucket);
-        std::string path_name(uri.path);
-        std::string key = path;
-
-        {
-            std::shared_lock<std::shared_timed_mutex> lock(_descriptors_mutex);
-            if (_descriptors.find(key) != _descriptors.end()) {
-                continue;
-            }
-        }
-
-        // Initiate Open but don't block. 
-        // We rely on GetDescriptor to be the single source of truth to avoid race conditions.
-        // If we really want to warm up here, we could call GetDescriptor asynchronously?
-        // For now, let's keep it simple.
+        TriggerOpen(path, std::string(uri.bucket), std::string(uri.path));
     }
 }
 
-std::shared_ptr<google::cloud::storage_experimental::ObjectDescriptor> AsyncClientGrpc::GetDescriptor(const std::string& key, const std::string& bucket, const std::string& path) {
-    // 1. Check Cache
-    {
-        std::shared_lock<std::shared_timed_mutex> lock(_descriptors_mutex);
-        auto it = _descriptors.find(key);
-        if (it != _descriptors.end()) {
-            return it->second;
-        }
-    }
-
-    // 2. Open (Blocking/Synchronized)
+std::shared_future<std::shared_ptr<google::cloud::storage_experimental::ObjectDescriptor>> 
+AsyncClientGrpc::TriggerOpen(const std::string& key, const std::string& bucket, const std::string& path) {
     std::unique_lock<std::shared_timed_mutex> lock(_descriptors_mutex);
-    
-    // Double check
+
+    // 1. Check Cache
     auto it = _descriptors.find(key);
     if (it != _descriptors.end()) {
-        return it->second;
+        std::promise<std::shared_ptr<google::cloud::storage_experimental::ObjectDescriptor>> p;
+        p.set_value(it->second);
+        return p.get_future();
     }
 
-    lock.unlock();
-
-    auto f = _client->Open(google::cloud::storage_experimental::BucketName(bucket), path);
-    auto result = f.get(); // BLOCKING WAIT
-
-    if (!result) {
-        LOG(ERROR) << "Failed to open descriptor for " << key << ": " << result.status().message();
-        return nullptr;
+    // 2. Check Pending Coalesced Opens
+    auto pending_it = _pending_opens.find(key);
+    if (pending_it != _pending_opens.end()) {
+        return pending_it->second;
     }
 
-    auto descriptor = std::make_shared<google::cloud::storage_experimental::ObjectDescriptor>(*std::move(result));
+    // 3. Initiate New Open
+    auto p = std::make_shared<std::promise<std::shared_ptr<google::cloud::storage_experimental::ObjectDescriptor>>>();
+    std::shared_future<std::shared_ptr<google::cloud::storage_experimental::ObjectDescriptor>> fut = p->get_future();
+    _pending_opens[key] = fut;
 
-    {
-        std::unique_lock<std::shared_timed_mutex> re_lock(_descriptors_mutex);
-        _descriptors[key] = descriptor; 
-    }
+    // We can hold the lock while firing Open because Open returns a future instantly.
+    // It does NOT block.
+    _client->Open(google::cloud::storage_experimental::BucketName(bucket), path)
+        .then([this, key, p](auto f) {
+            auto result = f.get();
+            std::shared_ptr<google::cloud::storage_experimental::ObjectDescriptor> descriptor;
+            
+            if (!result) {
+                LOG(ERROR) << "Failed to open descriptor for " << key << ": " << result.status().message();
+            } else {
+                descriptor = std::make_shared<google::cloud::storage_experimental::ObjectDescriptor>(*std::move(result));
+            }
 
-    return descriptor;
+            {
+                std::unique_lock<std::shared_timed_mutex> lock(_descriptors_mutex);
+                if (descriptor) {
+                    _descriptors[key] = descriptor;
+                }
+                _pending_opens.erase(key);
+            }
+            // Fulfill the promise, unblocking all waiting threads
+            p->set_value(descriptor);
+        });
+
+    return fut;
+}
+
+std::shared_ptr<google::cloud::storage_experimental::ObjectDescriptor> 
+AsyncClientGrpc::GetDescriptor(const std::string& key, const std::string& bucket, const std::string& path) {
+    // Uses the coalescing logic
+    return TriggerOpen(key, bucket, path).get();
 }
 
 void AsyncClientGrpc::ExecuteTask(ReadTask&& task, std::atomic<bool>& stopped) {
@@ -228,14 +229,17 @@ common::ResponseCode AsyncClientGrpc::Read(
 void AsyncClientGrpc::Monitor() {
     while (!_stop) {
         size_t descriptors_count = 0;
+        size_t pending_opens_count = 0;
         {
             std::shared_lock<std::shared_timed_mutex> lock(_descriptors_mutex);
             descriptors_count = _descriptors.size();
+            pending_opens_count = _pending_opens.size();
         }
         
         LOG(INFO) << "AsyncClientGrpc Monitor: "
                     << "Active Tasks: " << _active_tasks.load() << ", "
-                    << "Cached Descriptors: " << descriptors_count;
+                    << "Cached Descriptors: " << descriptors_count << ", "
+                    << "Pending Coalesced Opens: " << pending_opens_count;
         
         std::unique_lock<std::mutex> lock(_monitor_mutex);
         _monitor_cv.wait_for(lock, std::chrono::seconds(2), [this] { return _stop.load(); });
