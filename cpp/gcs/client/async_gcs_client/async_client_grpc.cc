@@ -17,13 +17,20 @@ AsyncClientGrpc::AsyncClientGrpc(const ClientConfiguration& config)
 {
     LOG(DEBUG) << "Initializing AsyncClientGrpc instance with dedicated AsyncClient";
     _client = std::make_shared<google::cloud::storage_experimental::AsyncClient>(config.options);
+    _monitor_thread = std::thread(&AsyncClientGrpc::Monitor, this);
 }
 
-AsyncClientGrpc::~AsyncClientGrpc() = default;
+AsyncClientGrpc::~AsyncClientGrpc()
+{
+    Stop();
+}
 
 void AsyncClientGrpc::Stop()
 {
     _stop = true;
+    if (_monitor_thread.joinable()) {
+        _monitor_thread.join();
+    }
 }
 
 void AsyncClientGrpc::PreOpen(const std::vector<std::string>& paths)
@@ -64,8 +71,10 @@ void AsyncClientGrpc::PreOpen(const std::vector<std::string>& paths)
         lock.unlock();
 
         // 3. Initiate Open (Async)
+        _active_opens++;
         _client->Open(google::cloud::storage_experimental::BucketName(bucket_name), path_name)
             .then([this, key](auto f) {
+                _active_opens--;
                 auto result = f.get();
                 std::shared_ptr<google::cloud::storage_experimental::ObjectDescriptor> descriptor;
                 
@@ -108,6 +117,7 @@ void AsyncClientGrpc::StreamToBuffer(
     std::shared_ptr<std::atomic<bool>> is_success)
 {
     // Start the first read and attach the completion handler
+    _active_streams++;
     auto f = reader.Read(std::move(token));
     OnReadComplete(std::move(f), std::move(reader), buffer, remaining_in_chunk, request_id, responder, pending_chunks, is_success);
 }
@@ -123,11 +133,13 @@ void AsyncClientGrpc::OnReadComplete(
     std::shared_ptr<std::atomic<bool>> is_success)
 {
     f.then([this, reader = std::move(reader), buffer, remaining_in_chunk, request_id, responder, pending_chunks, is_success](auto f) mutable {
+        _active_streams--;
         if (_stop) return;
 
         auto result = f.get();
         if (!result) {
-            LOG(ERROR) << "StreamToBuffer failed for request " << request_id << ": " << result.status().message();
+            _active_reads--;
+            LOG(ERROR) << "StreamToBuffer failed for request " << request_id << ": " << result.status().message() << ". Active reads: " << _active_reads;
             if (is_success->exchange(false)) {
                 responder->push({request_id, common::ResponseCode::FileAccessError});
             }
@@ -144,6 +156,7 @@ void AsyncClientGrpc::OnReadComplete(
         bool has_next = next_token.valid();
         
         if (has_next) {
+            _active_streams++;
             next_read_future = reader.Read(std::move(next_token));
         }
         // --- PIPELINING END ---
@@ -151,6 +164,7 @@ void AsyncClientGrpc::OnReadComplete(
         size_t bytes_copied = 0;
         for (const auto& chunk : payload.contents()) {
             if (bytes_copied + chunk.size() > remaining_in_chunk) {
+                _active_reads--;
                 LOG(ERROR) << "StreamToBuffer overflow for request " << request_id;
                 if (is_success->exchange(false)) {
                     responder->push({request_id, common::ResponseCode::FileAccessError});
@@ -168,9 +182,11 @@ void AsyncClientGrpc::OnReadComplete(
                            request_id, responder, pending_chunks, is_success);
         } else {
             // Completion Logic
+            _active_reads--;
             if (bytes_copied != remaining_in_chunk) {
                 LOG(ERROR) << "StreamToBuffer incomplete read for request " << request_id 
-                           << ". Expected " << remaining_in_chunk << ", got " << bytes_copied;
+                           << ". Expected " << remaining_in_chunk << ", got " << bytes_copied
+                           << ". Active reads: " << _active_reads;
                  if (is_success->exchange(false)) {
                     responder->push({request_id, common::ResponseCode::FileAccessError});
                 }
@@ -206,7 +222,7 @@ common::ResponseCode AsyncClientGrpc::Read(
     // Helper to trigger read on a descriptor
     auto trigger_read = [this, range, destination_buffer, request_id, responder, pending_chunks, is_success](
         std::shared_ptr<google::cloud::storage_experimental::ObjectDescriptor> descriptor) {
-            LOG(DEBUG) << "Triggering stream for request " << request_id;
+            _active_reads++;
             auto read_result = descriptor->Read(range.offset, range.length);
             
             StreamToBuffer(std::move(read_result.first), std::move(read_result.second), 
@@ -265,8 +281,10 @@ common::ResponseCode AsyncClientGrpc::Read(
     LOG(DEBUG) << "Initiating Open for request " << request_id;
 
     // 3. Initiate Open
+    _active_opens++;
     _client->Open(google::cloud::storage_experimental::BucketName(bucket_name), path_name)
         .then([this, key, request_id](auto f) {
+            _active_opens--;
             auto result = f.get();
             std::shared_ptr<google::cloud::storage_experimental::ObjectDescriptor> descriptor;
             
@@ -302,6 +320,25 @@ common::ResponseCode AsyncClientGrpc::Read(
         });
 
     return _stop ? common::ResponseCode::FinishedError : common::ResponseCode::Success;
+}
+
+void AsyncClientGrpc::Monitor() {
+    while (!_stop) {
+        size_t descriptors_count = 0;
+        size_t pending_opens_count = 0;
+        {
+            std::shared_lock<std::shared_timed_mutex> lock(_descriptors_mutex);
+            descriptors_count = _descriptors.size();
+            pending_opens_count = _pending_opens.size();
+        }
+        LOG(INFO) << "AsyncClientGrpc Monitor: "
+                    << "Active Opens: " << _active_opens.load() << ", "
+                    << "Active Reads: " << _active_reads.load() << ", "
+                    << "Active Streams: " << _active_streams.load() << ", "
+                    << "Cached Descriptors: " << descriptors_count << ", "
+                    << "Pending Coalesced Opens: " << pending_opens_count;
+        std::this_thread::sleep_for(std::chrono::seconds(2));
+    }
 }
 
 } // namespace runai::llm::streamer::impl::gcs

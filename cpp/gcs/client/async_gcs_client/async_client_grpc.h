@@ -64,6 +64,13 @@ private:
     std::map<std::string, std::vector<std::function<void(std::shared_ptr<google::cloud::storage_experimental::ObjectDescriptor>)>>> _pending_opens;
 
     std::atomic<bool> _stop{false};
+    std::thread _monitor_thread;
+    void Monitor();
+
+    // Debug counters
+    std::atomic<int> _active_opens{0};
+    std::atomic<int> _active_reads{0};
+    std::atomic<int> _active_streams{0};
 };
 
 } // namespace runai::llm::streamer::impl::gcs
