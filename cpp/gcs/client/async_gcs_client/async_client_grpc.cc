@@ -211,8 +211,12 @@ common::ResponseCode AsyncClientGrpc::Read(
     common::backend_api::ObjectRequestId_t request_id,
     std::shared_ptr<common::SharedQueue<common::backend_api::Response>> responder)
 {
-    // We use a single chunk for the whole range in the new async client
-    auto pending_chunks = std::make_shared<std::atomic<unsigned>>(1);
+    const size_t CHUNK_SIZE = 200 * 1024 * 1024; // 200 MiB
+    size_t total_length = range.length;
+    size_t num_chunks = (total_length + CHUNK_SIZE - 1) / CHUNK_SIZE;
+
+    // Shared state for the entire request (spanning multiple chunks)
+    auto pending_chunks = std::make_shared<std::atomic<unsigned>>(num_chunks);
     auto is_success = std::make_shared<std::atomic<bool>>(true);
 
     const auto uri = common::s3::StorageUri(path);
@@ -220,11 +224,10 @@ common::ResponseCode AsyncClientGrpc::Read(
     std::string path_name(uri.path);
     std::string key = path; 
 
-    LOG(DEBUG) << "Read called for request " << request_id << " range " << range.offset << "-" << range.length;
-
-    // Helper to trigger read on a descriptor
-    auto trigger_read = [this, range, destination_buffer, request_id, responder, pending_chunks, is_success](
-        std::shared_ptr<google::cloud::storage_experimental::ObjectDescriptor> descriptor) {
+    // Helper to trigger read on a descriptor for a specific chunk
+    auto trigger_read_chunk = [this, request_id, responder, pending_chunks, is_success](
+        std::shared_ptr<google::cloud::storage_experimental::ObjectDescriptor> descriptor,
+        size_t offset, size_t length, char* buffer) {
             
             // Limit concurrency
             AcquireReadPermit();
@@ -236,10 +239,29 @@ common::ResponseCode AsyncClientGrpc::Read(
             }
 
             _active_reads++;
-            auto read_result = descriptor->Read(range.offset, range.length);
+            auto read_result = descriptor->Read(offset, length);
             
             StreamToBuffer(std::move(read_result.first), std::move(read_result.second), 
-                        destination_buffer, range.length, request_id, responder, pending_chunks, is_success);
+                        buffer, length, request_id, responder, pending_chunks, is_success);
+    };
+
+    // Callback that launches ALL chunks once the descriptor is ready
+    auto launch_all_chunks = [trigger_read_chunk, range, destination_buffer, CHUNK_SIZE, num_chunks](
+        std::shared_ptr<google::cloud::storage_experimental::ObjectDescriptor> descriptor) {
+            if (!descriptor) return; // Error handled by caller/wrapper
+
+            size_t current_offset = range.offset;
+            char* current_buffer = destination_buffer;
+            size_t remaining = range.length;
+
+            for (size_t i = 0; i < num_chunks; ++i) {
+                size_t chunk_len = std::min(CHUNK_SIZE, remaining);
+                trigger_read_chunk(descriptor, current_offset, chunk_len, current_buffer);
+                
+                current_offset += chunk_len;
+                current_buffer += chunk_len;
+                remaining -= chunk_len;
+            }
     };
 
     // 1. Check Cache (Shared Lock)
@@ -249,8 +271,7 @@ common::ResponseCode AsyncClientGrpc::Read(
         if (it != _descriptors.end()) {
             auto descriptor = it->second;
             lock.unlock();
-            LOG(DEBUG) << "Cache hit for request " << request_id;
-            trigger_read(descriptor);
+            launch_all_chunks(descriptor);
             return _stop ? common::ResponseCode::FinishedError : common::ResponseCode::Success;
         }
     }
@@ -263,12 +284,12 @@ common::ResponseCode AsyncClientGrpc::Read(
     if (it != _descriptors.end()) {
         auto descriptor = it->second;
         lock.unlock();
-        trigger_read(descriptor);
+        launch_all_chunks(descriptor);
         return _stop ? common::ResponseCode::FinishedError : common::ResponseCode::Success;
     }
 
-    // 2. Check/Add to Pending Opens: Coalesce requests for the same object.
-    auto callback = [trigger_read, responder, request_id, is_success](std::shared_ptr<google::cloud::storage_experimental::ObjectDescriptor> descriptor) {
+    // 2. Check/Add to Pending Opens
+    auto callback = [launch_all_chunks, responder, request_id, is_success](std::shared_ptr<google::cloud::storage_experimental::ObjectDescriptor> descriptor) {
         if (!descriptor) {
             // Open failed, fail this specific request
             if (is_success->exchange(false)) {
@@ -276,7 +297,7 @@ common::ResponseCode AsyncClientGrpc::Read(
             }
             return;
         }
-        trigger_read(descriptor);
+        launch_all_chunks(descriptor);
     };
 
     auto& pending = _pending_opens[key];
@@ -284,14 +305,11 @@ common::ResponseCode AsyncClientGrpc::Read(
     pending.push_back(std::move(callback));
 
     if (!is_first_request) {
-        LOG(DEBUG) << "Coalescing request " << request_id << " onto pending Open";
         // An Open is already in progress. This request is now queued.
         return _stop ? common::ResponseCode::FinishedError : common::ResponseCode::Success;
     }
 
     lock.unlock();
-
-    LOG(DEBUG) << "Initiating Open for request " << request_id;
 
     // 3. Initiate Open
     _active_opens++;
@@ -305,7 +323,6 @@ common::ResponseCode AsyncClientGrpc::Read(
                 LOG(ERROR) << "Failed to open object descriptor for request " << request_id << ": " << result.status().message();
                 // descriptor remains null
             } else {
-                LOG(DEBUG) << "Open finished successfully for request " << request_id;
                 descriptor = std::make_shared<google::cloud::storage_experimental::ObjectDescriptor>(*std::move(result));
             }
 
@@ -326,7 +343,6 @@ common::ResponseCode AsyncClientGrpc::Read(
                 }
             }
             
-            LOG(DEBUG) << "Fanning out to " << callbacks.size() << " waiting requests for key " << key;
             for (const auto& cb : callbacks) {
                 cb(descriptor);
             }
