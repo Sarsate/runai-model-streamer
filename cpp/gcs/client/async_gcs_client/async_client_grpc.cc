@@ -37,6 +37,7 @@ void AsyncClientGrpc::Stop()
     _stop = true;
     _queue_cv.notify_all(); // Wake up worker to exit
     _semaphore_cv.notify_all(); // Wake up any waiting permits
+    _monitor_cv.notify_all(); // Wake up monitor
 
     if (_monitor_thread.joinable()) {
         _monitor_thread.join();
@@ -417,7 +418,9 @@ void AsyncClientGrpc::Monitor() {
                     << "Active Streams: " << _active_streams.load() << ", "
                     << "Cached Descriptors: " << descriptors_count << ", "
                     << "Pending Coalesced Opens: " << pending_opens_count;
-        std::this_thread::sleep_for(std::chrono::seconds(2));
+        
+        std::unique_lock<std::mutex> lock(_monitor_mutex);
+        _monitor_cv.wait_for(lock, std::chrono::seconds(2), [this] { return _stop.load(); });
     }
 }
 

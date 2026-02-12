@@ -99,6 +99,10 @@ private:
     std::condition_variable _queue_cv;
     std::thread _worker_thread;
     void WorkerLoop();
+
+    // Monitor Thread Control
+    std::mutex _monitor_mutex;
+    std::condition_variable _monitor_cv;
 };
 
 } // namespace runai::llm::streamer::impl::gcs
