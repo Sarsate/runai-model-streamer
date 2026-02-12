@@ -20,6 +20,11 @@ AsyncClientGrpc::AsyncClientGrpc(const ClientConfiguration& config)
     _client = std::make_shared<google::cloud::storage_experimental::AsyncClient>(config.options);
     _monitor_thread = std::thread(&AsyncClientGrpc::Monitor, this);
     _worker_thread = std::thread(&AsyncClientGrpc::WorkerLoop, this);
+
+    // Warmup: Trigger Auth and Connection Establishment
+    // We intentionally ignore the result, as we expect it to fail.
+    // The side effect (Auth + Connection) is what we want to happen ASAP.
+    auto warmup_f = _client->Open(google::cloud::storage_experimental::BucketName("runai-warmup-dummy-bucket"), "dummy-object");
 }
 
 AsyncClientGrpc::~AsyncClientGrpc()
@@ -80,25 +85,16 @@ void AsyncClientGrpc::PreOpen(const std::vector<std::string>& paths)
 
         // 3. Initiate Open (Async)
         _active_opens++;
-        auto start_time = std::chrono::steady_clock::now();
-        LOG(INFO) << "PreOpen scheduling Open for " << key;
         _client->Open(google::cloud::storage_experimental::BucketName(bucket_name), path_name)
-            .then([this, key, start_time](auto f) {
-                auto callback_start_time = std::chrono::steady_clock::now();
-                auto schedule_latency = std::chrono::duration_cast<std::chrono::milliseconds>(callback_start_time - start_time).count();
-                LOG(INFO) << "PreOpen callback started for " << key << " after " << schedule_latency << "ms on thread " << std::this_thread::get_id();
-
+            .then([this, key](auto f) {
                 _active_opens--;
-                auto end_time = std::chrono::steady_clock::now();
-                auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time).count();
-                
                 auto result = f.get();
                 std::shared_ptr<google::cloud::storage_experimental::ObjectDescriptor> descriptor;
                 
                 if (!result) {
-                    LOG(ERROR) << "PreOpen failed for " << key << " after " << duration << "ms on thread " << std::this_thread::get_id() << ": " << result.status().message();
+                    LOG(ERROR) << "PreOpen failed for " << key << ": " << result.status().message();
                 } else {
-                    LOG(INFO) << "PreOpen finished for " << key << " in " << duration << "ms on thread " << std::this_thread::get_id();
+                    LOG(DEBUG) << "PreOpen finished for " << key;
                     descriptor = std::make_shared<google::cloud::storage_experimental::ObjectDescriptor>(*std::move(result));
                 }
     
