@@ -3,6 +3,7 @@
 #include <iostream>
 #include <cstring>
 #include <thread>
+#include <chrono>
 
 #include "google/cloud/future.h"
 #include "google/cloud/storage/client.h"
@@ -79,15 +80,25 @@ void AsyncClientGrpc::PreOpen(const std::vector<std::string>& paths)
 
         // 3. Initiate Open (Async)
         _active_opens++;
+        auto start_time = std::chrono::steady_clock::now();
+        LOG(INFO) << "PreOpen scheduling Open for " << key;
         _client->Open(google::cloud::storage_experimental::BucketName(bucket_name), path_name)
-            .then([this, key](auto f) {
+            .then([this, key, start_time](auto f) {
+                auto callback_start_time = std::chrono::steady_clock::now();
+                auto schedule_latency = std::chrono::duration_cast<std::chrono::milliseconds>(callback_start_time - start_time).count();
+                LOG(INFO) << "PreOpen callback started for " << key << " after " << schedule_latency << "ms on thread " << std::this_thread::get_id();
+
                 _active_opens--;
+                auto end_time = std::chrono::steady_clock::now();
+                auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time).count();
+                
                 auto result = f.get();
                 std::shared_ptr<google::cloud::storage_experimental::ObjectDescriptor> descriptor;
                 
                 if (!result) {
-                    LOG(ERROR) << "PreOpen failed for " << key << ": " << result.status().message();
+                    LOG(ERROR) << "PreOpen failed for " << key << " after " << duration << "ms on thread " << std::this_thread::get_id() << ": " << result.status().message();
                 } else {
+                    LOG(INFO) << "PreOpen finished for " << key << " in " << duration << "ms on thread " << std::this_thread::get_id();
                     descriptor = std::make_shared<google::cloud::storage_experimental::ObjectDescriptor>(*std::move(result));
                 }
     
