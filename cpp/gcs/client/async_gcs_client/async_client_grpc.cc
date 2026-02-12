@@ -110,12 +110,14 @@ std::shared_ptr<google::cloud::storage_experimental::ObjectDescriptor> AsyncClie
 
 void AsyncClientGrpc::ExecuteTask(ReadTask&& task, std::atomic<bool>& stopped) {
     if (stopped) return;
+    _active_tasks++;
 
     auto descriptor = GetDescriptor(task.key, task.bucket_name, task.path_name);
     if (!descriptor) {
         if (task.is_success->exchange(false)) {
             task.responder->push({task.request_id, common::ResponseCode::FileAccessError});
         }
+        _active_tasks--;
         return;
     }
 
@@ -136,6 +138,7 @@ void AsyncClientGrpc::ExecuteTask(ReadTask&& task, std::atomic<bool>& stopped) {
              if (task.is_success->exchange(false)) {
                 task.responder->push({task.request_id, common::ResponseCode::FileAccessError});
             }
+            _active_tasks--;
             return;
         }
 
@@ -148,6 +151,7 @@ void AsyncClientGrpc::ExecuteTask(ReadTask&& task, std::atomic<bool>& stopped) {
                  if (task.is_success->exchange(false)) {
                     task.responder->push({task.request_id, common::ResponseCode::FileAccessError});
                 }
+                _active_tasks--;
                 return;
             }
             std::memcpy(task.buffer + bytes_copied, chunk.data(), chunk.size());
@@ -160,6 +164,7 @@ void AsyncClientGrpc::ExecuteTask(ReadTask&& task, std::atomic<bool>& stopped) {
          if (task.is_success->exchange(false)) {
             task.responder->push({task.request_id, common::ResponseCode::FileAccessError});
         }
+        _active_tasks--;
         return;
     }
 
@@ -167,6 +172,7 @@ void AsyncClientGrpc::ExecuteTask(ReadTask&& task, std::atomic<bool>& stopped) {
     if (task.pending_chunks->fetch_sub(1) == 1) {
         task.responder->push({task.request_id, common::ResponseCode::Success});
     }
+    _active_tasks--;
 }
 
 common::ResponseCode AsyncClientGrpc::Read(
@@ -226,6 +232,10 @@ void AsyncClientGrpc::Monitor() {
             std::shared_lock<std::shared_timed_mutex> lock(_descriptors_mutex);
             descriptors_count = _descriptors.size();
         }
+        
+        LOG(INFO) << "AsyncClientGrpc Monitor: "
+                    << "Active Tasks: " << _active_tasks.load() << ", "
+                    << "Cached Descriptors: " << descriptors_count;
         
         std::unique_lock<std::mutex> lock(_monitor_mutex);
         _monitor_cv.wait_for(lock, std::chrono::seconds(2), [this] { return _stop.load(); });

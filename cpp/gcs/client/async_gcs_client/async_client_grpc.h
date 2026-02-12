@@ -68,6 +68,7 @@ private:
 
     std::atomic<bool> _stop{false};
     utils::ThreadPool<ReadTask> _thread_pool;
+    std::atomic<int> _active_tasks{0};
 
     // Monitor
     std::thread _monitor_thread;
