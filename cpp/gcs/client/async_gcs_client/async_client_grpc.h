@@ -47,6 +47,16 @@ private:
         std::shared_ptr<std::atomic<unsigned>> pending_chunks,
         std::shared_ptr<std::atomic<bool>> is_success);
 
+    void OnReadComplete(
+        google::cloud::future<google::cloud::StatusOr<std::pair<google::cloud::storage_experimental::ReadPayload, google::cloud::storage_experimental::AsyncToken>>> f,
+        google::cloud::storage_experimental::AsyncReader reader,
+        char* buffer,
+        size_t remaining_in_chunk,
+        common::backend_api::ObjectRequestId_t request_id,
+        std::shared_ptr<common::SharedQueue<common::backend_api::Response>> responder,
+        std::shared_ptr<std::atomic<unsigned>> pending_chunks,
+        std::shared_ptr<std::atomic<bool>> is_success);
+
     std::shared_ptr<google::cloud::storage_experimental::AsyncClient> _client;
     
     std::shared_timed_mutex _descriptors_mutex;

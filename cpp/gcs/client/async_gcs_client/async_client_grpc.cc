@@ -107,63 +107,82 @@ void AsyncClientGrpc::StreamToBuffer(
     std::shared_ptr<std::atomic<unsigned>> pending_chunks,
     std::shared_ptr<std::atomic<bool>> is_success)
 {
-    reader.Read(std::move(token)).then(
-        [this, reader = std::move(reader), buffer, remaining_in_chunk, request_id, responder, pending_chunks, is_success]
-        (auto f) mutable {
-            if (_stop) return; 
+    // Start the first read and attach the completion handler
+    auto f = reader.Read(std::move(token));
+    OnReadComplete(std::move(f), std::move(reader), buffer, remaining_in_chunk, request_id, responder, pending_chunks, is_success);
+}
 
-            auto result = f.get();
-            if (!result) {
-                LOG(ERROR) << "StreamToBuffer failed for request " << request_id << ": " << result.status().message();
+void AsyncClientGrpc::OnReadComplete(
+    google::cloud::future<google::cloud::StatusOr<std::pair<google::cloud::storage_experimental::ReadPayload, google::cloud::storage_experimental::AsyncToken>>> f,
+    google::cloud::storage_experimental::AsyncReader reader,
+    char* buffer,
+    size_t remaining_in_chunk,
+    common::backend_api::ObjectRequestId_t request_id,
+    std::shared_ptr<common::SharedQueue<common::backend_api::Response>> responder,
+    std::shared_ptr<std::atomic<unsigned>> pending_chunks,
+    std::shared_ptr<std::atomic<bool>> is_success)
+{
+    f.then([this, reader = std::move(reader), buffer, remaining_in_chunk, request_id, responder, pending_chunks, is_success](auto f) mutable {
+        if (_stop) return;
+
+        auto result = f.get();
+        if (!result) {
+            LOG(ERROR) << "StreamToBuffer failed for request " << request_id << ": " << result.status().message();
+            if (is_success->exchange(false)) {
+                responder->push({request_id, common::ResponseCode::FileAccessError});
+            }
+            return;
+        }
+
+        auto& payload = result->first;
+        auto& next_token = result->second;
+
+        // --- PIPELINING START ---
+        // Initiate the next read BEFORE processing the current chunk.
+        // This ensures the network download overlaps with the memory copy below.
+        google::cloud::future<google::cloud::StatusOr<std::pair<google::cloud::storage_experimental::ReadPayload, google::cloud::storage_experimental::AsyncToken>>> next_read_future;
+        bool has_next = next_token.valid();
+        
+        if (has_next) {
+            next_read_future = reader.Read(std::move(next_token));
+        }
+        // --- PIPELINING END ---
+
+        size_t bytes_copied = 0;
+        for (const auto& chunk : payload.contents()) {
+            if (bytes_copied + chunk.size() > remaining_in_chunk) {
+                LOG(ERROR) << "StreamToBuffer overflow for request " << request_id;
                 if (is_success->exchange(false)) {
                     responder->push({request_id, common::ResponseCode::FileAccessError});
                 }
                 return;
             }
+            std::memcpy(buffer + bytes_copied, chunk.data(), chunk.size());
+            bytes_copied += chunk.size();
+        }
 
-            auto& payload = result->first;
-            auto& next_token = result->second;
-            
-            size_t bytes_copied = 0;
-            if (remaining_in_chunk > 0 && buffer != nullptr) {
-                 // Log start of stream data for this request (approximate)
-                 // We can't easily track "start" across recursions without extra state, 
-                 // but we can log if this is a substantial chunk.
-                 // Better: Log whenever we complete a request.
+        if (has_next) {
+            // Recurse using the already-running future
+            OnReadComplete(std::move(next_read_future), std::move(reader), 
+                           buffer + bytes_copied, remaining_in_chunk - bytes_copied, 
+                           request_id, responder, pending_chunks, is_success);
+        } else {
+            // Completion Logic
+            if (bytes_copied != remaining_in_chunk) {
+                LOG(ERROR) << "StreamToBuffer incomplete read for request " << request_id 
+                           << ". Expected " << remaining_in_chunk << ", got " << bytes_copied;
+                 if (is_success->exchange(false)) {
+                    responder->push({request_id, common::ResponseCode::FileAccessError});
+                }
+                return;
             }
 
-            for (const auto& chunk : payload.contents()) {
-                if (bytes_copied + chunk.size() > remaining_in_chunk) {
-                    LOG(ERROR) << "StreamToBuffer overflow for request " << request_id;
-                    if (is_success->exchange(false)) {
-                        responder->push({request_id, common::ResponseCode::FileAccessError});
-                    }
-                    return;
-                }
-                std::memcpy(buffer + bytes_copied, chunk.data(), chunk.size());
-                bytes_copied += chunk.size();
+            if (pending_chunks->fetch_sub(1) == 1) {
+                // LOG(DEBUG) << "Stream finished for request " << request_id << " (" << remaining_in_chunk << " bytes)";
+                responder->push({request_id, common::ResponseCode::Success});
             }
-
-            if (next_token.valid()) {
-                StreamToBuffer(std::move(reader), std::move(next_token), 
-                               buffer + bytes_copied, remaining_in_chunk - bytes_copied, 
-                               request_id, responder, pending_chunks, is_success);
-            } else {
-                if (bytes_copied != remaining_in_chunk) {
-                    LOG(ERROR) << "StreamToBuffer incomplete read for request " << request_id 
-                               << ". Expected " << remaining_in_chunk << ", got " << bytes_copied;
-                     if (is_success->exchange(false)) {
-                        responder->push({request_id, common::ResponseCode::FileAccessError});
-                    }
-                    return;
-                }
-
-                if (pending_chunks->fetch_sub(1) == 1) {
-                    LOG(DEBUG) << "Stream finished for request " << request_id << " (" << remaining_in_chunk << " bytes)";
-                    responder->push({request_id, common::ResponseCode::Success});
-                }
-            }
-        });
+        }
+    });
 }
 
 common::ResponseCode AsyncClientGrpc::Read(
