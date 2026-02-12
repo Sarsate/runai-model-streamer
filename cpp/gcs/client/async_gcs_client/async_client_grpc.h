@@ -7,6 +7,9 @@
 #include <atomic>
 #include <functional>
 #include <shared_mutex>
+#include <thread>
+#include <condition_variable>
+#include <queue>
 
 #include "google/cloud/storage/async/client.h"
 #include "google/cloud/storage/async/object_descriptor.h"
@@ -73,11 +76,29 @@ private:
     std::atomic<int> _active_streams{0};
 
     // Concurrency Control
-    int _max_concurrent_reads{64};
+    int _max_concurrent_reads{96};
     std::mutex _semaphore_mutex;
     std::condition_variable _semaphore_cv;
     void AcquireReadPermit();
     void ReleaseReadPermit();
+
+    // Internal Request Queue
+    struct ReadRequest {
+        std::shared_ptr<google::cloud::storage_experimental::ObjectDescriptor> descriptor;
+        size_t offset;
+        size_t length;
+        char* buffer;
+        common::backend_api::ObjectRequestId_t request_id;
+        std::shared_ptr<common::SharedQueue<common::backend_api::Response>> responder;
+        std::shared_ptr<std::atomic<unsigned>> pending_chunks;
+        std::shared_ptr<std::atomic<bool>> is_success;
+    };
+
+    std::queue<ReadRequest> _request_queue;
+    std::mutex _queue_mutex;
+    std::condition_variable _queue_cv;
+    std::thread _worker_thread;
+    void WorkerLoop();
 };
 
 } // namespace runai::llm::streamer::impl::gcs

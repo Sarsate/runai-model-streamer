@@ -18,6 +18,7 @@ AsyncClientGrpc::AsyncClientGrpc(const ClientConfiguration& config)
     LOG(DEBUG) << "Initializing AsyncClientGrpc instance with dedicated AsyncClient";
     _client = std::make_shared<google::cloud::storage_experimental::AsyncClient>(config.options);
     _monitor_thread = std::thread(&AsyncClientGrpc::Monitor, this);
+    _worker_thread = std::thread(&AsyncClientGrpc::WorkerLoop, this);
 }
 
 AsyncClientGrpc::~AsyncClientGrpc()
@@ -28,8 +29,14 @@ AsyncClientGrpc::~AsyncClientGrpc()
 void AsyncClientGrpc::Stop()
 {
     _stop = true;
+    _queue_cv.notify_all(); // Wake up worker to exit
+    _semaphore_cv.notify_all(); // Wake up any waiting permits
+
     if (_monitor_thread.joinable()) {
         _monitor_thread.join();
+    }
+    if (_worker_thread.joinable()) {
+        _worker_thread.join();
     }
 }
 
@@ -229,20 +236,12 @@ common::ResponseCode AsyncClientGrpc::Read(
         std::shared_ptr<google::cloud::storage_experimental::ObjectDescriptor> descriptor,
         size_t offset, size_t length, char* buffer) {
             
-            // Limit concurrency
-            AcquireReadPermit();
-            if (_stop) {
-                if (is_success->exchange(false)) {
-                    responder->push({request_id, common::ResponseCode::FinishedError});
-                }
-                return;
+            // Push to queue (Non-blocking for application)
+            {
+                std::unique_lock<std::mutex> lock(_queue_mutex);
+                _request_queue.push({descriptor, offset, length, buffer, request_id, responder, pending_chunks, is_success});
             }
-
-            _active_reads++;
-            auto read_result = descriptor->Read(offset, length);
-            
-            StreamToBuffer(std::move(read_result.first), std::move(read_result.second), 
-                        buffer, length, request_id, responder, pending_chunks, is_success);
+            _queue_cv.notify_one();
     };
 
     // Callback that launches ALL chunks once the descriptor is ready
@@ -351,6 +350,39 @@ common::ResponseCode AsyncClientGrpc::Read(
     return _stop ? common::ResponseCode::FinishedError : common::ResponseCode::Success;
 }
 
+
+void AsyncClientGrpc::WorkerLoop() {
+    while (!_stop) {
+        std::unique_lock<std::mutex> lock(_queue_mutex);
+        _queue_cv.wait(lock, [this] {
+            return !_request_queue.empty() || _stop;
+        });
+
+        if (_stop) return;
+
+        // Process up to N requests at once to avoid constant locking/unlocking?
+        // No, keep it simple: pop one, process one.
+        
+        ReadRequest req = _request_queue.front();
+        _request_queue.pop();
+        lock.unlock(); // Release queue lock before acquiring permit
+
+        // This will block if we hit concurrency limit
+        AcquireReadPermit();
+
+        if (_stop) {
+            if (req.is_success->exchange(false)) {
+                req.responder->push({req.request_id, common::ResponseCode::FinishedError});
+            }
+            return;
+        }
+
+        _active_reads++;
+        auto read_result = req.descriptor->Read(req.offset, req.length);
+        StreamToBuffer(std::move(read_result.first), std::move(read_result.second), 
+                       req.buffer, req.length, req.request_id, req.responder, req.pending_chunks, req.is_success);
+    }
+}
 
 void AsyncClientGrpc::AcquireReadPermit() {
     std::unique_lock<std::mutex> lock(_semaphore_mutex);
