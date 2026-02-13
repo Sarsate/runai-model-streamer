@@ -10,13 +10,11 @@
 
 #include "common/storage_uri/storage_uri.h"
 #include "utils/logging/logging.h"
-#include "utils/env/env.h"
 
 namespace runai::llm::streamer::impl::gcs
 {
 
 AsyncClientGrpc::AsyncClientGrpc(const ClientConfiguration& config) :
-    _max_concurrent_reads(config.max_concurrency),
     _cpu_pool([this](DataChunkTask&& task, std::atomic<bool>& stopped) {
         HandleDataChunk(std::move(task), stopped);
     }, 20) // Use 20 threads for CPU offload
@@ -267,7 +265,8 @@ common::ResponseCode AsyncClientGrpc::Read(
     common::backend_api::ObjectRequestId_t request_id,
     std::shared_ptr<common::SharedQueue<common::backend_api::Response>> responder)
 {
-    static const size_t CHUNK_SIZE = utils::getenv<size_t>("RUNAI_STREAMER_GCS_CHUNK_SIZE", 200 * 1024 * 1024);
+    LOG(INFO) << "AsyncClientGrpc::Read request " << request_id << " length: " << range.length;
+    const size_t CHUNK_SIZE = 200 * 1024 * 1024; // 200 MiB
     size_t total_length = range.length;
     size_t num_chunks = (total_length + CHUNK_SIZE - 1) / CHUNK_SIZE;
 
