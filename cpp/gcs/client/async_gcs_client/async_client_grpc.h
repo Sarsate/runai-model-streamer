@@ -103,6 +103,10 @@ private:
     // Monitor Thread Control
     std::mutex _monitor_mutex;
     std::condition_variable _monitor_cv;
+
+    // Instrumentation
+    std::atomic<uint64_t> _total_copy_time_us{0};
+    std::atomic<uint64_t> _total_bytes_copied{0};
 };
 
 } // namespace runai::llm::streamer::impl::gcs

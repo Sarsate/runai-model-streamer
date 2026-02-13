@@ -178,6 +178,8 @@ void AsyncClientGrpc::OnReadComplete(
         // --- PIPELINING END ---
 
         size_t bytes_copied = 0;
+        auto start_copy = std::chrono::steady_clock::now();
+
         for (const auto& chunk : payload.contents()) {
             if (bytes_copied + chunk.size() > remaining_in_chunk) {
                 _active_reads--;
@@ -191,6 +193,9 @@ void AsyncClientGrpc::OnReadComplete(
             std::memcpy(buffer + bytes_copied, chunk.data(), chunk.size());
             bytes_copied += chunk.size();
         }
+        auto end_copy = std::chrono::steady_clock::now();
+        _total_copy_time_us += std::chrono::duration_cast<std::chrono::microseconds>(end_copy - start_copy).count();
+        _total_bytes_copied += bytes_copied;
 
         if (has_next) {
             // Recurse using the already-running future
@@ -412,12 +417,22 @@ void AsyncClientGrpc::Monitor() {
             descriptors_count = _descriptors.size();
             pending_opens_count = _pending_opens.size();
         }
+
+        uint64_t copy_time_us = _total_copy_time_us.exchange(0);
+        uint64_t bytes_copied = _total_bytes_copied.exchange(0);
+        double copy_speed_gbps = 0;
+        if (copy_time_us > 0) {
+            // bytes / us = MB/s. * 1000000 / 1024^3 = GiB/s
+            copy_speed_gbps = (double)bytes_copied / (double)copy_time_us * 1000000.0 / 1024.0 / 1024.0 / 1024.0;
+        }
+
         LOG(INFO) << "AsyncClientGrpc Monitor: "
                     << "Active Opens: " << _active_opens.load() << ", "
                     << "Active Reads: " << _active_reads.load() << ", "
                     << "Active Streams: " << _active_streams.load() << ", "
                     << "Cached Descriptors: " << descriptors_count << ", "
-                    << "Pending Coalesced Opens: " << pending_opens_count;
+                    << "Pending Coalesced Opens: " << pending_opens_count << ", "
+                    << "Memcpy Speed: " << copy_speed_gbps << " GiB/s (" << (copy_time_us / 1000) << " ms utilized)";
         
         std::unique_lock<std::mutex> lock(_monitor_mutex);
         _monitor_cv.wait_for(lock, std::chrono::seconds(2), [this] { return _stop.load(); });
