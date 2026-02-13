@@ -18,6 +18,7 @@
 #include "common/backend_api/object_storage/object_storage.h"
 #include "common/backend_api/response/response.h"
 #include "common/shared_queue/shared_queue.h"
+#include "utils/threadpool/threadpool.h"
 
 namespace runai::llm::streamer::impl::gcs
 {
@@ -40,6 +41,20 @@ public:
     void Stop();
 
 private:
+    struct DataChunkTask {
+        google::cloud::storage_experimental::ReadPayload payload;
+        char* destination;
+        size_t expected_size;
+        size_t remaining_in_chunk; // For validation
+        common::backend_api::ObjectRequestId_t request_id;
+        std::shared_ptr<common::SharedQueue<common::backend_api::Response>> responder;
+        std::shared_ptr<std::atomic<unsigned>> pending_chunks;
+        std::shared_ptr<std::atomic<bool>> is_success;
+        bool is_last_packet;
+    };
+
+    void HandleDataChunk(DataChunkTask&& task, std::atomic<bool>& stopped);
+
     void StreamToBuffer(
         google::cloud::storage_experimental::AsyncReader reader,
         google::cloud::storage_experimental::AsyncToken token,
@@ -76,7 +91,7 @@ private:
     std::atomic<int> _active_streams{0};
 
     // Concurrency Control
-    int _max_concurrent_reads{96};
+    int _max_concurrent_reads;
     std::mutex _semaphore_mutex;
     std::condition_variable _semaphore_cv;
     void AcquireReadPermit();
@@ -99,6 +114,9 @@ private:
     std::condition_variable _queue_cv;
     std::thread _worker_thread;
     void WorkerLoop();
+
+    // CPU Offload Pool
+    runai::llm::streamer::utils::ThreadPool<DataChunkTask> _cpu_pool;
 
     // Monitor Thread Control
     std::mutex _monitor_mutex;

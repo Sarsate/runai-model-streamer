@@ -10,11 +10,16 @@
 
 #include "common/storage_uri/storage_uri.h"
 #include "utils/logging/logging.h"
+#include "utils/env/env.h"
 
 namespace runai::llm::streamer::impl::gcs
 {
 
-AsyncClientGrpc::AsyncClientGrpc(const ClientConfiguration& config)
+AsyncClientGrpc::AsyncClientGrpc(const ClientConfiguration& config) :
+    _max_concurrent_reads(config.max_concurrency),
+    _cpu_pool([this](DataChunkTask&& task, std::atomic<bool>& stopped) {
+        HandleDataChunk(std::move(task), stopped);
+    }, 20) // Use 20 threads for CPU offload
 {
     LOG(DEBUG) << "Initializing AsyncClientGrpc instance with dedicated AsyncClient";
     _client = std::make_shared<google::cloud::storage_experimental::AsyncClient>(config.options);
@@ -25,6 +30,55 @@ AsyncClientGrpc::AsyncClientGrpc(const ClientConfiguration& config)
     // We intentionally ignore the result, as we expect it to fail.
     // The side effect (Auth + Connection) is what we want to happen ASAP.
     auto warmup_f = _client->Open(google::cloud::storage_experimental::BucketName("runai-warmup-dummy-bucket"), "dummy-object");
+}
+
+void AsyncClientGrpc::HandleDataChunk(DataChunkTask&& task, std::atomic<bool>& stopped) {
+    if (stopped) return;
+
+    size_t bytes_copied = 0;
+    auto start_copy = std::chrono::steady_clock::now();
+
+    for (const auto& chunk : task.payload.contents()) {
+        if (bytes_copied + chunk.size() > task.remaining_in_chunk) {
+            if (task.is_last_packet) {
+                _active_reads--;
+                ReleaseReadPermit();
+            }
+            LOG(ERROR) << "StreamToBuffer overflow for request " << task.request_id;
+            if (task.is_success->exchange(false)) {
+                task.responder->push({task.request_id, common::ResponseCode::FileAccessError});
+            }
+            return;
+        }
+        std::memcpy(task.destination + bytes_copied, chunk.data(), chunk.size());
+        bytes_copied += chunk.size();
+    }
+    
+    auto end_copy = std::chrono::steady_clock::now();
+    _total_copy_time_us += std::chrono::duration_cast<std::chrono::microseconds>(end_copy - start_copy).count();
+    _total_bytes_copied += bytes_copied;
+
+    if (task.is_last_packet) {
+        _active_reads--;
+        ReleaseReadPermit();
+
+        // Validation for the *entire* 200MB chunk completion
+        // Note: 'remaining_in_chunk' passed to this task was the remaining size *before* this packet.
+        // So if this is the last packet, bytes_copied should equal remaining_in_chunk.
+        if (bytes_copied != task.remaining_in_chunk) {
+             LOG(ERROR) << "StreamToBuffer incomplete read for request " << task.request_id 
+                           << ". Expected " << task.remaining_in_chunk << ", got " << bytes_copied
+                           << ". Active reads: " << _active_reads;
+             if (task.is_success->exchange(false)) {
+                task.responder->push({task.request_id, common::ResponseCode::FileAccessError});
+            }
+            return;
+        }
+
+        if (task.pending_chunks->fetch_sub(1) == 1) {
+            task.responder->push({task.request_id, common::ResponseCode::Success});
+        }
+    }
 }
 
 AsyncClientGrpc::~AsyncClientGrpc()
@@ -165,6 +219,12 @@ void AsyncClientGrpc::OnReadComplete(
         auto& payload = result->first;
         auto& next_token = result->second;
 
+        // Calculate size WITHOUT copying yet
+        size_t current_payload_size = 0;
+        for (const auto& chunk : payload.contents()) {
+            current_payload_size += chunk.size();
+        }
+
         // --- PIPELINING START ---
         // Initiate the next read BEFORE processing the current chunk.
         // This ensures the network download overlaps with the memory copy below.
@@ -177,49 +237,25 @@ void AsyncClientGrpc::OnReadComplete(
         }
         // --- PIPELINING END ---
 
-        size_t bytes_copied = 0;
-        auto start_copy = std::chrono::steady_clock::now();
-
-        for (const auto& chunk : payload.contents()) {
-            if (bytes_copied + chunk.size() > remaining_in_chunk) {
-                _active_reads--;
-                ReleaseReadPermit();
-                LOG(ERROR) << "StreamToBuffer overflow for request " << request_id;
-                if (is_success->exchange(false)) {
-                    responder->push({request_id, common::ResponseCode::FileAccessError});
-                }
-                return;
-            }
-            std::memcpy(buffer + bytes_copied, chunk.data(), chunk.size());
-            bytes_copied += chunk.size();
-        }
-        auto end_copy = std::chrono::steady_clock::now();
-        _total_copy_time_us += std::chrono::duration_cast<std::chrono::microseconds>(end_copy - start_copy).count();
-        _total_bytes_copied += bytes_copied;
+        // Offload processing
+        DataChunkTask task{
+            std::move(payload),
+            buffer,
+            current_payload_size,
+            remaining_in_chunk,
+            request_id,
+            responder,
+            pending_chunks,
+            is_success,
+            !has_next // is_last_packet
+        };
+        _cpu_pool.push(std::move(task));
 
         if (has_next) {
             // Recurse using the already-running future
             OnReadComplete(std::move(next_read_future), std::move(reader), 
-                           buffer + bytes_copied, remaining_in_chunk - bytes_copied, 
+                           buffer + current_payload_size, remaining_in_chunk - current_payload_size, 
                            request_id, responder, pending_chunks, is_success);
-        } else {
-            // Completion Logic
-            _active_reads--;
-            ReleaseReadPermit();
-            if (bytes_copied != remaining_in_chunk) {
-                LOG(ERROR) << "StreamToBuffer incomplete read for request " << request_id 
-                           << ". Expected " << remaining_in_chunk << ", got " << bytes_copied
-                           << ". Active reads: " << _active_reads;
-                 if (is_success->exchange(false)) {
-                    responder->push({request_id, common::ResponseCode::FileAccessError});
-                }
-                return;
-            }
-
-            if (pending_chunks->fetch_sub(1) == 1) {
-                // LOG(DEBUG) << "Stream finished for request " << request_id << " (" << remaining_in_chunk << " bytes)";
-                responder->push({request_id, common::ResponseCode::Success});
-            }
         }
     });
 }
@@ -231,7 +267,7 @@ common::ResponseCode AsyncClientGrpc::Read(
     common::backend_api::ObjectRequestId_t request_id,
     std::shared_ptr<common::SharedQueue<common::backend_api::Response>> responder)
 {
-    const size_t CHUNK_SIZE = 200 * 1024 * 1024; // 200 MiB
+    static const size_t CHUNK_SIZE = utils::getenv<size_t>("RUNAI_STREAMER_GCS_CHUNK_SIZE", 200 * 1024 * 1024);
     size_t total_length = range.length;
     size_t num_chunks = (total_length + CHUNK_SIZE - 1) / CHUNK_SIZE;
 
