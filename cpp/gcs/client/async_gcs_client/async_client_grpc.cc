@@ -89,12 +89,14 @@ AsyncClientGrpc::TriggerOpen(const std::string& key, const std::string& bucket, 
                 descriptor = std::make_shared<google::cloud::storage_experimental::ObjectDescriptor>(*std::move(result));
             }
 
-            {
+            try {
                 std::unique_lock<std::shared_timed_mutex> lock(_descriptors_mutex);
                 if (descriptor) {
                     _descriptors[key] = descriptor;
                 }
                 _pending_opens.erase(key);
+            } catch (...) {
+                LOG(WARNING) << "Exception in TriggerOpen callback (likely shutdown race)";
             }
             // Fulfill the promise, unblocking all waiting threads
             p->set_value(descriptor);
@@ -112,68 +114,130 @@ AsyncClientGrpc::GetDescriptor(const std::string& key, const std::string& bucket
 void AsyncClientGrpc::ExecuteTask(ReadTask&& task, std::atomic<bool>& stopped) {
     if (stopped) return;
     _active_tasks++;
+    LOG(DEBUG) << "ExecuteTask start for request " << task.request_id;
 
+    // Helper to cleanup on exit
+    // We use a lambda to ensure we ALWAYS decrement, no matter where we return.
+    auto finalize = [&](bool success) {
+        _active_tasks--;
+        
+        // Decrement pending chunks
+        // If we are the LAST chunk (fetch_sub returns 1) AND the request is overall successful...
+        if (task.pending_chunks->fetch_sub(1) == 1) {
+            if (task.is_success->load()) {
+                LOG(DEBUG) << "Finished reading request " << task.request_id << " " << task.key << " offset " << task.offset << " size " << task.length;
+                task.responder->push({task.request_id, common::ResponseCode::Success});
+            }
+        }
+    };
+
+    LOG(DEBUG) << "Request " << task.request_id << " waiting for descriptor...";
     auto descriptor = GetDescriptor(task.key, task.bucket_name, task.path_name);
+    LOG(DEBUG) << "Request " << task.request_id << " got descriptor.";
+
     if (!descriptor) {
         if (task.is_success->exchange(false)) {
             task.responder->push({task.request_id, common::ResponseCode::FileAccessError});
         }
-        _active_tasks--;
+        finalize(false);
         return;
     }
 
-    // 1. Get Reader/Token (Instant)
-    auto reader_token_pair = descriptor->Read(task.offset, task.length);
-    auto reader = std::move(reader_token_pair.first);
-    auto token = std::move(reader_token_pair.second);
+    try {
+        // 1. Get Reader/Token (Instant)
+        LOG(DEBUG) << "Request " << task.request_id << " starting initial read...";
+        auto reader_token_pair = descriptor->Read(task.offset, task.length);
+        auto reader = std::move(reader_token_pair.first);
+        auto token = std::move(reader_token_pair.second);
+        LOG(DEBUG) << "Request " << task.request_id << " initial read started.";
 
-    size_t bytes_copied = 0;
+        size_t bytes_copied = 0;
 
-    // 2. Read Loop
-    while (token.valid() && !stopped) {
-        auto f = reader.Read(std::move(token));
-        auto result = f.get(); // BLOCKING IO
-
-        if (!result) {
-             LOG(ERROR) << "Read failed for request " << task.request_id << ": " << result.status().message();
-             if (task.is_success->exchange(false)) {
-                task.responder->push({task.request_id, common::ResponseCode::FileAccessError});
+        // Pipelining Setup: Start the first read immediately
+        if (!token.valid()) {
+            if (task.length == 0) {
+                finalize(true);
+                return;
             }
-            _active_tasks--;
+            // Should not happen for non-zero length unless file is truncated/error
+            LOG(ERROR) << "Invalid token for non-zero request " << task.request_id;
+            finalize(false);
             return;
         }
+        auto pending_read = reader.Read(std::move(token));
 
-        auto& payload = result->first;
-        token = std::move(result->second); // Update token for next iteration
+        // 2. Read Loop
+        LOG(DEBUG) << "Request " << task.request_id << " entering read loop.";
+        while (!stopped) {
+            // Block until the *current* chunk arrives, with timeout logging
+            std::future_status status;
+            do {
+                LOG(DEBUG) << "Request " << task.request_id << " waiting for chunk...";
+                status = pending_read.wait_for(std::chrono::seconds(10));
+                if (status == std::future_status::timeout) {
+                    LOG(WARNING) << "Request " << task.request_id << " timed out waiting for chunk from GCS. Retrying wait...";
+                }
+            } while (status == std::future_status::timeout && !stopped);
 
-        for (const auto& chunk : payload.contents()) {
-            if (bytes_copied + chunk.size() > task.length) {
-                // Overflow
+            if (stopped) return;
+
+            auto result = pending_read.get(); 
+            LOG(DEBUG) << "Request " << task.request_id << " got chunk.";
+
+            if (!result) {
+                 LOG(ERROR) << "Read failed for request " << task.request_id << ": " << result.status().message();
                  if (task.is_success->exchange(false)) {
                     task.responder->push({task.request_id, common::ResponseCode::FileAccessError});
                 }
-                _active_tasks--;
+                finalize(false);
                 return;
             }
-            std::memcpy(task.buffer + bytes_copied, chunk.data(), chunk.size());
-            bytes_copied += chunk.size();
-        }
-    }
 
-    if (bytes_copied != task.length) {
-         LOG(ERROR) << "Incomplete read for request " << task.request_id;
+            auto& payload = result->first;
+            auto next_token = std::move(result->second);
+
+            // PIPELINING OPTIMIZATION: 
+            // Kick off the *next* read request immediately, BEFORE we spend time copying data.
+            // This allows the network download of Chunk N+1 to happen in parallel with the CPU copy of Chunk N.
+            bool has_more = next_token.valid();
+            if (has_more && !stopped) {
+                pending_read = reader.Read(std::move(next_token));
+            }
+
+            for (const auto& chunk : payload.contents()) {
+                if (bytes_copied + chunk.size() > task.length) {
+                    // Overflow
+                     if (task.is_success->exchange(false)) {
+                        task.responder->push({task.request_id, common::ResponseCode::FileAccessError});
+                    }
+                    finalize(false);
+                    return;
+                }
+                std::memcpy(task.buffer + bytes_copied, chunk.data(), chunk.size());
+                bytes_copied += chunk.size();
+            }
+
+            if (!has_more) break;
+        }
+
+        if (bytes_copied != task.length) {
+             LOG(ERROR) << "Incomplete read for request " << task.request_id;
+             if (task.is_success->exchange(false)) {
+                task.responder->push({task.request_id, common::ResponseCode::FileAccessError});
+            }
+            finalize(false);
+            return;
+        }
+    } catch (...) {
          if (task.is_success->exchange(false)) {
             task.responder->push({task.request_id, common::ResponseCode::FileAccessError});
         }
-        _active_tasks--;
+        finalize(false);
         return;
     }
 
-    // 3. Completion
-    if (task.pending_chunks->fetch_sub(1) == 1) {
-        task.responder->push({task.request_id, common::ResponseCode::Success});
-    }
-    _active_tasks--;
+    // Success path
+    finalize(true);
 }
 
 common::ResponseCode AsyncClientGrpc::Read(
