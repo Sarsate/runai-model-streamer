@@ -6,11 +6,74 @@
 #include <chrono>
 #include <algorithm>
 
+#if defined(__x86_64__) || defined(_M_X64)
+#include <immintrin.h>
+#endif
+
 #include "google/cloud/future.h"
 #include "google/cloud/storage/client.h"
 
 #include "common/storage_uri/storage_uri.h"
 #include "utils/logging/logging.h"
+
+namespace {
+// Optimized memcpy using non-temporal stores to bypass cache for large writes.
+// This significantly improves memory bandwidth when writing to destination buffers
+// that will not be immediately read by the CPU (e.g., GPU transfer buffers).
+
+#if defined(__x86_64__) || defined(_M_X64)
+__attribute__((target("avx2")))
+void non_temporal_memcpy(void* dest, const void* src, size_t n) {
+    // Threshold for using NT stores (avoid overhead for tiny copies)
+    // 256 bytes is a reasonable cut-off for AVX overhead.
+    if (n < 256) {
+        std::memcpy(dest, src, n);
+        return;
+    }
+
+    char* d = static_cast<char*>(dest);
+    const char* s = static_cast<const char*>(src);
+
+    // Align destination to 32-byte boundary for AVX
+    size_t align_offset = (32 - (reinterpret_cast<uintptr_t>(d) & 31)) & 31;
+    if (align_offset > 0) {
+        if (n < align_offset) { // Should be covered by < 256 check, but safe
+            std::memcpy(d, s, n);
+            return;
+        }
+        std::memcpy(d, s, align_offset);
+        d += align_offset;
+        s += align_offset;
+        n -= align_offset;
+    }
+
+    // Main loop: 32 bytes at a time using AVX streaming stores
+    // _mm256_stream_si256 requires 32-byte alignment for destination
+    size_t blocks = n / 32;
+    for (size_t i = 0; i < blocks; ++i) {
+        __m256i data = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(s));
+        _mm256_stream_si256(reinterpret_cast<__m256i*>(d), data);
+        s += 32;
+        d += 32;
+    }
+    
+    // Tail copy
+    size_t remaining = n % 32;
+    if (remaining > 0) {
+        std::memcpy(d, s, remaining);
+    }
+    
+    // SFENCE is usually needed after NT stores to ensure visibility before
+    // another thread consumes data.
+    _mm_sfence();
+}
+#else
+// Fallback for non-x86 architectures (e.g., ARM64)
+void non_temporal_memcpy(void* dest, const void* src, size_t n) {
+    std::memcpy(dest, src, n);
+}
+#endif
+} // namespace
 
 namespace runai::llm::streamer::impl::gcs
 {
@@ -114,7 +177,6 @@ AsyncClientGrpc::GetDescriptor(const std::string& key, const std::string& bucket
 void AsyncClientGrpc::ExecuteTask(ReadTask&& task, std::atomic<bool>& stopped) {
     if (stopped) return;
     _active_tasks++;
-    LOG(DEBUG) << "ExecuteTask start for request " << task.request_id;
 
     // Helper to cleanup on exit
     // We use a lambda to ensure we ALWAYS decrement, no matter where we return.
@@ -131,10 +193,7 @@ void AsyncClientGrpc::ExecuteTask(ReadTask&& task, std::atomic<bool>& stopped) {
         }
     };
 
-    LOG(DEBUG) << "Request " << task.request_id << " waiting for descriptor...";
     auto descriptor = GetDescriptor(task.key, task.bucket_name, task.path_name);
-    LOG(DEBUG) << "Request " << task.request_id << " got descriptor.";
-
     if (!descriptor) {
         if (task.is_success->exchange(false)) {
             task.responder->push({task.request_id, common::ResponseCode::FileAccessError});
@@ -145,11 +204,9 @@ void AsyncClientGrpc::ExecuteTask(ReadTask&& task, std::atomic<bool>& stopped) {
 
     try {
         // 1. Get Reader/Token (Instant)
-        LOG(DEBUG) << "Request " << task.request_id << " starting initial read...";
         auto reader_token_pair = descriptor->Read(task.offset, task.length);
         auto reader = std::move(reader_token_pair.first);
         auto token = std::move(reader_token_pair.second);
-        LOG(DEBUG) << "Request " << task.request_id << " initial read started.";
 
         size_t bytes_copied = 0;
 
@@ -167,12 +224,10 @@ void AsyncClientGrpc::ExecuteTask(ReadTask&& task, std::atomic<bool>& stopped) {
         auto pending_read = reader.Read(std::move(token));
 
         // 2. Read Loop
-        LOG(DEBUG) << "Request " << task.request_id << " entering read loop.";
         while (!stopped) {
             // Block until the *current* chunk arrives, with timeout logging
             std::future_status status;
             do {
-                LOG(DEBUG) << "Request " << task.request_id << " waiting for chunk...";
                 status = pending_read.wait_for(std::chrono::seconds(10));
                 if (status == std::future_status::timeout) {
                     LOG(WARNING) << "Request " << task.request_id << " timed out waiting for chunk from GCS. Retrying wait...";
@@ -182,7 +237,6 @@ void AsyncClientGrpc::ExecuteTask(ReadTask&& task, std::atomic<bool>& stopped) {
             if (stopped) return;
 
             auto result = pending_read.get(); 
-            LOG(DEBUG) << "Request " << task.request_id << " got chunk.";
 
             if (!result) {
                  LOG(ERROR) << "Read failed for request " << task.request_id << ": " << result.status().message();
@@ -213,7 +267,10 @@ void AsyncClientGrpc::ExecuteTask(ReadTask&& task, std::atomic<bool>& stopped) {
                     finalize(false);
                     return;
                 }
-                std::memcpy(task.buffer + bytes_copied, chunk.data(), chunk.size());
+                
+                // Use non-temporal memcpy optimization
+                non_temporal_memcpy(task.buffer + bytes_copied, chunk.data(), chunk.size());
+                
                 bytes_copied += chunk.size();
             }
 
