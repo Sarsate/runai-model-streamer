@@ -91,7 +91,7 @@ private:
     std::atomic<int> _active_streams{0};
 
     // Concurrency Control
-    int _max_concurrent_reads{96};
+    int _max_concurrent_reads{512};
     std::mutex _semaphore_mutex;
     std::condition_variable _semaphore_cv;
     void AcquireReadPermit();

@@ -2,6 +2,8 @@
 
 #include "google/cloud/storage/client.h"
 #include "google/cloud/grpc_options.h"
+#include "google/cloud/storage/async/options.h"
+#include "google/cloud/storage/async/retry_policy.h"
 
 #include "common/exception/exception.h"
 #include "common/response_code/response_code.h"
@@ -125,12 +127,22 @@ ClientConfiguration::ClientConfiguration()
         LOG(DEBUG) << "Using new AsyncClient";
         // std::cerr << "DEBUG: ClientConfiguration: RUNAI_STREAMER_GCS_USE_ASYNC_CLIENT is TRUE" << std::endl;
 
+        options.set<google::cloud::storage::BackoffPolicyOption>(
+            google::cloud::storage::ExponentialBackoffPolicy(
+                std::chrono::milliseconds(1), // Initial delay
+                std::chrono::milliseconds(100), // Maximum delay
+                2.0                             // Scaling factor
+            ).clone());
+
+        options.set<google::cloud::storage::RetryPolicyOption>(
+            google::cloud::storage::LimitedErrorCountRetryPolicy(5).clone());
+
         // For the new global client (or per-worker client), we want to partition the 
         // global resource budget among the workers.
         // If concurrency is 1, it gets the full budget.
         // If concurrency is 20, each worker gets a slice.
         
-        int target_global_channels = 24;
+        int target_global_channels = 6;
         int target_global_threads = 96;
 
         int num_channels = std::max(1, target_global_channels / (int)worker_concurrency);
