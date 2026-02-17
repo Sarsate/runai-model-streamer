@@ -62,8 +62,13 @@ private:
 
     std::shared_ptr<google::cloud::storage_experimental::AsyncClient> _client;
     
+    struct CachedDescriptor {
+        std::shared_ptr<google::cloud::storage_experimental::ObjectDescriptor> descriptor;
+        std::chrono::steady_clock::time_point last_used;
+    };
+
     std::shared_timed_mutex _descriptors_mutex;
-    std::map<std::string, std::shared_ptr<google::cloud::storage_experimental::ObjectDescriptor>> _descriptors;
+    std::map<std::string, CachedDescriptor> _descriptors;
     std::map<std::string, std::shared_future<std::shared_ptr<google::cloud::storage_experimental::ObjectDescriptor>>> _pending_opens;
 
     std::atomic<bool> _stop{false};

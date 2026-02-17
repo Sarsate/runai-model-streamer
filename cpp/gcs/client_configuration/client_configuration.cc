@@ -130,7 +130,7 @@ ClientConfiguration::ClientConfiguration()
         // If concurrency is 1, it gets the full budget.
         // If concurrency is 20, each worker gets a slice.
         
-        int target_global_channels = 24;
+        int target_global_channels = 6;
         int target_global_threads = 96;
 
         int num_channels = std::max(1, target_global_channels / (int)worker_concurrency);

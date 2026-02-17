@@ -81,9 +81,9 @@ namespace runai::llm::streamer::impl::gcs
 AsyncClientGrpc::AsyncClientGrpc(const ClientConfiguration& config) :
     _thread_pool([this](ReadTask&& task, std::atomic<bool>& stopped) {
         ExecuteTask(std::move(task), stopped);
-    }, config.max_concurrency)
+    }, 48)
 {
-    LOG(DEBUG) << "Initializing AsyncClientGrpc with ThreadPool size: " << config.max_concurrency;
+    LOG(DEBUG) << "Initializing AsyncClientGrpc with ThreadPool size: " << 48;
     _client = std::make_shared<google::cloud::storage_experimental::AsyncClient>(config.options);
     _monitor_thread = std::thread(&AsyncClientGrpc::Monitor, this);
 
@@ -123,8 +123,9 @@ AsyncClientGrpc::TriggerOpen(const std::string& key, const std::string& bucket, 
     // 1. Check Cache
     auto it = _descriptors.find(key);
     if (it != _descriptors.end()) {
+        it->second.last_used = std::chrono::steady_clock::now();
         std::promise<std::shared_ptr<google::cloud::storage_experimental::ObjectDescriptor>> p;
-        p.set_value(it->second);
+        p.set_value(it->second.descriptor);
         return p.get_future();
     }
 
@@ -155,7 +156,7 @@ AsyncClientGrpc::TriggerOpen(const std::string& key, const std::string& bucket, 
             try {
                 std::unique_lock<std::shared_timed_mutex> lock(_descriptors_mutex);
                 if (descriptor) {
-                    _descriptors[key] = descriptor;
+                    _descriptors[key] = {descriptor, std::chrono::steady_clock::now()};
                 }
                 _pending_opens.erase(key);
             } catch (...) {
@@ -230,14 +231,14 @@ void AsyncClientGrpc::ExecuteTask(ReadTask&& task, std::atomic<bool>& stopped) {
             // Block until the *current* chunk arrives, with timeout logging
             std::future_status status;
             do {
-                // Reduced timeout to 100ms for straggler detection
-                status = pending_read.wait_for(std::chrono::milliseconds(100));
+                // Reduced timeout to 1000ms for straggler detection
+                status = pending_read.wait_for(std::chrono::milliseconds(1000));
                 
                 if (status == std::future_status::timeout) {
                     auto now = std::chrono::steady_clock::now();
                     auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_progress_time).count();
                     
-                    if (elapsed > 100) {
+                    if (elapsed > 1000) {
                         LOG(WARNING) << "Request " << task.request_id << " stalled (" << elapsed << "ms). Switching to fresh connection...";
                         
                         // Failover Logic: Open fresh descriptor (uncached)
@@ -414,7 +415,15 @@ void AsyncClientGrpc::Monitor() {
         size_t descriptors_count = 0;
         size_t pending_opens_count = 0;
         {
-            std::shared_lock<std::shared_timed_mutex> lock(_descriptors_mutex);
+            std::unique_lock<std::shared_timed_mutex> lock(_descriptors_mutex);
+            auto now = std::chrono::steady_clock::now();
+            for (auto it = _descriptors.begin(); it != _descriptors.end(); ) {
+                if (std::chrono::duration_cast<std::chrono::seconds>(now - it->second.last_used).count() >= 1) {
+                    it = _descriptors.erase(it);
+                } else {
+                    ++it;
+                }
+            }
             descriptors_count = _descriptors.size();
             pending_opens_count = _pending_opens.size();
         }
