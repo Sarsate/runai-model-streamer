@@ -51,21 +51,15 @@ AsyncClientGrpc::TriggerOpen(const std::string& key, const std::string& bucket, 
     auto it = _descriptors.find(key);
     if (it != _descriptors.end()) {
         it->second.last_used = std::chrono::steady_clock::now();
-        std::promise<std::shared_ptr<google::cloud::storage_experimental::ObjectDescriptor>> p;
-        p.set_value(it->second.descriptor);
-        return p.get_future();
+        return it->second.descriptor_future;
     }
 
-    // 2. Check Pending Coalesced Opens
-    auto pending_it = _pending_opens.find(key);
-    if (pending_it != _pending_opens.end()) {
-        return pending_it->second;
-    }
-
-    // 3. Initiate New Open
+    // 2. Initiate New Open
     auto p = std::make_shared<std::promise<std::shared_ptr<google::cloud::storage_experimental::ObjectDescriptor>>>();
     std::shared_future<std::shared_ptr<google::cloud::storage_experimental::ObjectDescriptor>> fut = p->get_future();
-    _pending_opens[key] = fut;
+    
+    // Insert into cache immediately with the future
+    _descriptors[key] = {fut, std::chrono::steady_clock::now()};
 
     // We can hold the lock while firing Open because Open returns a future instantly.
     // It does NOT block.
@@ -76,19 +70,18 @@ AsyncClientGrpc::TriggerOpen(const std::string& key, const std::string& bucket, 
             
             if (!result) {
                 LOG(ERROR) << "Failed to open descriptor for " << key << ": " << result.status().message();
+                
+                // On failure, remove the entry so it can be retried later
+                try {
+                    std::unique_lock<std::shared_timed_mutex> lock(_descriptors_mutex);
+                    _descriptors.erase(key);
+                } catch (...) {
+                    LOG(WARNING) << "Exception in TriggerOpen failure cleanup (likely shutdown race)";
+                }
             } else {
                 descriptor = std::make_shared<google::cloud::storage_experimental::ObjectDescriptor>(*std::move(result));
             }
 
-            try {
-                std::unique_lock<std::shared_timed_mutex> lock(_descriptors_mutex);
-                if (descriptor) {
-                    _descriptors[key] = {descriptor, std::chrono::steady_clock::now()};
-                }
-                _pending_opens.erase(key);
-            } catch (...) {
-                LOG(WARNING) << "Exception in TriggerOpen callback (likely shutdown race)";
-            }
             // Fulfill the promise, unblocking all waiting threads
             p->set_value(descriptor);
         });
@@ -276,27 +269,38 @@ common::ResponseCode AsyncClientGrpc::Read(
 void AsyncClientGrpc::Monitor() {
     while (!_stop) {
         size_t descriptors_count = 0;
-        size_t pending_opens_count = 0;
         {
             std::unique_lock<std::shared_timed_mutex> lock(_descriptors_mutex);
             auto now = std::chrono::steady_clock::now();
             for (auto it = _descriptors.begin(); it != _descriptors.end(); ) {
                 auto idle_time = std::chrono::duration_cast<std::chrono::seconds>(now - it->second.last_used).count();
-                // Only expire if idle > 1s AND no other thread is holding it (use_count == 1 means only the map holds it)
-                if (idle_time >= 1 && it->second.descriptor.use_count() == 1) {
+                
+                // Only expire if idle > 1s AND no other thread is holding it (use_count == 1 means only the map/future holds it)
+                bool expired = false;
+                if (idle_time >= 1) {
+                    auto& fut = it->second.descriptor_future;
+                    // Check if future is ready (using 0 timeout wait)
+                    if (fut.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+                        const auto& descriptor = fut.get();
+                        // If descriptor is null (failed open that wasn't cleaned up) or use_count is 1
+                        if (!descriptor || descriptor.use_count() == 1) {
+                            expired = true;
+                        }
+                    }
+                }
+
+                if (expired) {
                     it = _descriptors.erase(it);
                 } else {
                     ++it;
                 }
             }
             descriptors_count = _descriptors.size();
-            pending_opens_count = _pending_opens.size();
         }
         
         LOG(INFO) << "AsyncClientGrpc Monitor: "
                     << "Active Tasks: " << _active_tasks.load() << ", "
-                    << "Cached Descriptors: " << descriptors_count << ", "
-                    << "Pending Coalesced Opens: " << pending_opens_count;
+                    << "Cached Descriptors: " << descriptors_count;
         
         std::unique_lock<std::mutex> lock(_monitor_mutex);
         _monitor_cv.wait_for(lock, std::chrono::seconds(2), [this] { return _stop.load(); });
