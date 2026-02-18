@@ -106,16 +106,6 @@ void AsyncClientGrpc::Stop()
     }
 }
 
-void AsyncClientGrpc::PreOpen(const std::vector<std::string>& paths)
-{
-    // Fire-and-forget TriggerOpen to populate cache/pending map.
-    // This allows subsequent Reads to coalesce onto these operations.
-    for (const auto& path : paths) {
-        const auto uri = common::s3::StorageUri(path);
-        TriggerOpen(path, std::string(uri.bucket), std::string(uri.path));
-    }
-}
-
 std::shared_future<std::shared_ptr<google::cloud::storage_experimental::ObjectDescriptor>> 
 AsyncClientGrpc::TriggerOpen(const std::string& key, const std::string& bucket, const std::string& path) {
     std::unique_lock<std::shared_timed_mutex> lock(_descriptors_mutex);

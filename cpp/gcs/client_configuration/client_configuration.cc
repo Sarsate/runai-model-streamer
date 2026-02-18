@@ -133,7 +133,7 @@ ClientConfiguration::ClientConfiguration()
         int target_global_channels = 6;
         int target_global_threads = 96;
 
-        int num_channels = std::max(1, target_global_channels / (int)worker_concurrency);
+        int num_channels = target_global_channels;
         options.set<google::cloud::GrpcNumChannelsOption>(num_channels);
 
         // Ensure at least 8 threads per worker to prevent starvation, 

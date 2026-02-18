@@ -29,8 +29,6 @@ public:
     explicit AsyncClientGrpc(const ClientConfiguration& config);
     ~AsyncClientGrpc();
 
-    void PreOpen(const std::vector<std::string>& paths);
-
     common::ResponseCode Read(
         const std::string& path,
         common::backend_api::ObjectRange_t range,

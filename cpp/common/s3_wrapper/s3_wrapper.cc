@@ -271,23 +271,4 @@ common::backend_api::ObjectShutdownPolicy_t S3ClientWrapper::get_backend_shutdow
     return get_backend_shutdown_policy_();
 }
 
-void S3ClientWrapper::PreOpen(const std::vector<std::string>& paths) {
-    if (paths.empty()) return;
-    try {
-        // std::cerr << "DEBUG: S3ClientWrapper::PreOpen loading symbol..." << std::endl;
-        auto pre_open_ = _backend_handle->dylib_ptr->dlsym<ResponseCode(*)(common::backend_api::ObjectClientHandle_t, const char**, unsigned int)>("obj_pre_open");
-        std::vector<const char*> c_paths;
-        c_paths.reserve(paths.size());
-        for (const auto& p : paths) {
-            c_paths.push_back(p.c_str());
-        }
-        // std::cerr << "DEBUG: S3ClientWrapper::PreOpen calling backend..." << std::endl;
-        pre_open_(_s3_client, c_paths.data(), static_cast<unsigned int>(c_paths.size()));
-    } catch (...) {
-        // Ignore errors in pre-open as it is an optimization
-        // std::cerr << "DEBUG ERROR: S3ClientWrapper::PreOpen exception" << std::endl;
-        LOG(WARNING) << "Failed to pre-open paths";
-    }
-}
-
 }; // namespace runai::llm::streamer::common::s3

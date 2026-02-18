@@ -90,12 +90,6 @@ common::ResponseCode write_stream_to_buffer(
     return common::ResponseCode::Success;
 }
 
-void GCSClient::PreOpen(const std::vector<std::string>& paths) {
-    if (_client_config.use_new_async_client && _async_client_grpc) {
-        _async_client_grpc->PreOpen(paths);
-    }
-}
-
 GCSClient::~GCSClient() {
 }
 

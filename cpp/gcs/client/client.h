@@ -41,9 +41,6 @@ struct GCSClient : common::IClient
 
     common::backend_api::Response async_read_response();
 
-    // Initiate connection to the object storage for the given paths and wait for completion
-    void PreOpen(const std::vector<std::string>& paths);
-
     // Stop sending requests to the object store
     // If stopped before all requests for an async_read() call are sent, subsequent request chunks will not be sent.
     void stop();

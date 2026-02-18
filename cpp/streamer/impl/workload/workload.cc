@@ -122,8 +122,6 @@ void Workload::async_read(std::atomic<bool> & stopped)
         {
             paths.push_back(batch.path);
         }
-        // std::cerr << "DEBUG: Workload calling PreOpen for " << paths.size() << " files" << std::endl;
-        _reader->PreOpen(paths);
 
         unsigned requested_batches = 0;
         for (auto & [file_index, batch] : _batches_by_file_index)

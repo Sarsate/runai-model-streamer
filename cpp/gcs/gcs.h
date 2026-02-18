@@ -38,12 +38,6 @@ extern "C" common::backend_api::ResponseCode_t obj_wait_for_completions(common::
                                                                         unsigned int* out_num_events_retrieved,
                                                                         common::backend_api::ObjectWaitMode_t wait_mode);
 
-extern "C" common::backend_api::ResponseCode_t obj_pre_open(
-    common::backend_api::ObjectClientHandle_t client_handle,
-    const char** paths,
-    unsigned int num_paths
-);
-
 // stop clients
 // Stops the responder of each client, in order to notify callers which sent a request and are waiting for a response
 extern "C" common::backend_api::ResponseCode_t obj_cancel_all_reads();
