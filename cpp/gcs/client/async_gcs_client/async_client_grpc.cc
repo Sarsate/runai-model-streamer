@@ -152,73 +152,12 @@ void AsyncClientGrpc::ExecuteTask(ReadTask&& task, std::atomic<bool>& stopped) {
         auto pending_read = reader.Read(std::move(token));
 
         // 2. Read Loop
-        auto last_progress_time = std::chrono::steady_clock::now();
         
         while (!stopped) {
             // Block until the *current* chunk arrives, with timeout logging
             std::future_status status;
             do {
-                // Reduced timeout to 1000ms for straggler detection
-                status = pending_read.wait_for(std::chrono::milliseconds(1000));
-                
-                if (status == std::future_status::timeout) {
-                    auto now = std::chrono::steady_clock::now();
-                    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_progress_time).count();
-                    
-                    if (elapsed > 1000) {
-                        LOG(WARNING) << "Request " << task.request_id << " stalled (" << elapsed << "ms). Switching to fresh connection...";
-                        
-                        // Failover Logic: Open fresh descriptor (uncached)
-                        // We block here because we are already stalled.
-                        // Note: We use the *original* key/bucket/path for the Open call.
-                        auto fresh_open_future = _client->Open(google::cloud::storage_experimental::BucketName(task.bucket_name), task.path_name);
-                        
-                        // Wait for the fresh open
-                        auto fresh_open_result = fresh_open_future.get();
-                        if (!fresh_open_result) {
-                            LOG(ERROR) << "Failed to open fresh connection for request " << task.request_id << ": " << fresh_open_result.status().message();
-                            // If failover fails, we break and let the original error handling take over (or retry loop continues)
-                            // Ideally, fail hard or retry again. Let's fail hard to avoid infinite loops.
-                             if (task.is_success->exchange(false)) {
-                                task.responder->push({task.request_id, common::ResponseCode::FileAccessError});
-                            }
-                            finalize(false);
-                            return;
-                        }
-                        
-                        // Create new reader for REMAINING bytes
-                        size_t remaining_len = task.length - bytes_copied;
-                        size_t new_offset = task.offset + bytes_copied;
-                        
-                        auto new_descriptor = *std::move(fresh_open_result);
-                        auto new_reader_token_pair = new_descriptor.Read(new_offset, remaining_len);
-                        
-                        // Replace current state
-                        reader = std::move(new_reader_token_pair.first);
-                        auto new_token = std::move(new_reader_token_pair.second);
-                        
-                        // Start reading immediately from new reader
-                        if (!new_token.valid()) {
-                             if (remaining_len == 0) {
-                                finalize(true);
-                                return;
-                            }
-                            LOG(ERROR) << "Invalid token from fresh connection for request " << task.request_id;
-                            finalize(false);
-                            return;
-                        }
-                        
-                        // Abandon old pending_read (destructor handles cancel)
-                        pending_read = reader.Read(std::move(new_token));
-                        
-                        // Reset progress timer
-                        last_progress_time = std::chrono::steady_clock::now();
-                        
-                        // Force loop to wait on new pending_read
-                        status = std::future_status::timeout; // Pretend we timed out to loop back to wait_for
-                        continue; 
-                    }
-                }
+                status = pending_read.wait_for(std::chrono::milliseconds(100));
             } while (status == std::future_status::timeout && !stopped);
 
             if (stopped) return;
@@ -236,9 +175,6 @@ void AsyncClientGrpc::ExecuteTask(ReadTask&& task, std::atomic<bool>& stopped) {
 
             auto& payload = result->first;
             auto next_token = std::move(result->second);
-
-            // Update progress time
-            last_progress_time = std::chrono::steady_clock::now();
 
             // PIPELINING OPTIMIZATION: 
             // Kick off the *next* read request immediately, BEFORE we spend time copying data.
