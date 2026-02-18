@@ -6,74 +6,11 @@
 #include <chrono>
 #include <algorithm>
 
-#if defined(__x86_64__) || defined(_M_X64)
-#include <immintrin.h>
-#endif
-
 #include "google/cloud/future.h"
 #include "google/cloud/storage/client.h"
 
 #include "common/storage_uri/storage_uri.h"
 #include "utils/logging/logging.h"
-
-namespace {
-// Optimized memcpy using non-temporal stores to bypass cache for large writes.
-// This significantly improves memory bandwidth when writing to destination buffers
-// that will not be immediately read by the CPU (e.g., GPU transfer buffers).
-
-#if defined(__x86_64__) || defined(_M_X64)
-__attribute__((target("avx2")))
-void non_temporal_memcpy(void* dest, const void* src, size_t n) {
-    // Threshold for using NT stores (avoid overhead for tiny copies)
-    // 256 bytes is a reasonable cut-off for AVX overhead.
-    if (n < 256) {
-        std::memcpy(dest, src, n);
-        return;
-    }
-
-    char* d = static_cast<char*>(dest);
-    const char* s = static_cast<const char*>(src);
-
-    // Align destination to 32-byte boundary for AVX
-    size_t align_offset = (32 - (reinterpret_cast<uintptr_t>(d) & 31)) & 31;
-    if (align_offset > 0) {
-        if (n < align_offset) { // Should be covered by < 256 check, but safe
-            std::memcpy(d, s, n);
-            return;
-        }
-        std::memcpy(d, s, align_offset);
-        d += align_offset;
-        s += align_offset;
-        n -= align_offset;
-    }
-
-    // Main loop: 32 bytes at a time using AVX streaming stores
-    // _mm256_stream_si256 requires 32-byte alignment for destination
-    size_t blocks = n / 32;
-    for (size_t i = 0; i < blocks; ++i) {
-        __m256i data = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(s));
-        _mm256_stream_si256(reinterpret_cast<__m256i*>(d), data);
-        s += 32;
-        d += 32;
-    }
-    
-    // Tail copy
-    size_t remaining = n % 32;
-    if (remaining > 0) {
-        std::memcpy(d, s, remaining);
-    }
-    
-    // SFENCE is usually needed after NT stores to ensure visibility before
-    // another thread consumes data.
-    _mm_sfence();
-}
-#else
-// Fallback for non-x86 architectures (e.g., ARM64)
-void non_temporal_memcpy(void* dest, const void* src, size_t n) {
-    std::memcpy(dest, src, n);
-}
-#endif
-} // namespace
 
 namespace runai::llm::streamer::impl::gcs
 {
@@ -322,7 +259,7 @@ void AsyncClientGrpc::ExecuteTask(ReadTask&& task, std::atomic<bool>& stopped) {
                 }
                 
                 // Use non-temporal memcpy optimization
-                non_temporal_memcpy(task.buffer + bytes_copied, chunk.data(), chunk.size());
+                std::memcpy(task.buffer + bytes_copied, chunk.data(), chunk.size());
                 
                 bytes_copied += chunk.size();
             }
