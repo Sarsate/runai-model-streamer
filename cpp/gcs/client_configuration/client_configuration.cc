@@ -21,15 +21,12 @@ namespace runai::llm::streamer::impl::gcs
 
 ClientConfiguration::ClientConfiguration()
 {
-    // std::cerr << "DEBUG: ClientConfiguration constructor called" << std::endl;
     
     // Debug helper to check raw env var
     auto check_env = [](const char* name) {
         const char* val = std::getenv(name);
         if (val) {
-            // std::cerr << "DEBUG: Env var " << name << " = '" << val << "'" << std::endl;
         } else {
-            // std::cerr << "DEBUG: Env var " << name << " is unset" << std::endl;
         }
     };
 
@@ -111,12 +108,10 @@ ClientConfiguration::ClientConfiguration()
     try {
         use_new_async_client = utils::getenv<bool>("RUNAI_STREAMER_GCS_USE_ASYNC_CLIENT", false);
     } catch (const std::exception& e) {
-        // std::cerr << "DEBUG ERROR: Failed to parse RUNAI_STREAMER_GCS_USE_ASYNC_CLIENT: " << e.what() << std::endl;
         // Fallback or rethrow? Let's check the raw value manually to be helpful.
         std::string raw_val = std::getenv("RUNAI_STREAMER_GCS_USE_ASYNC_CLIENT") ? std::getenv("RUNAI_STREAMER_GCS_USE_ASYNC_CLIENT") : "";
         if (raw_val == "true" || raw_val == "True" || raw_val == "TRUE") {
             use_new_async_client = true;
-            // std::cerr << "DEBUG: Handled 'true' string manually." << std::endl;
         } else {
              throw; // Rethrow if it's not a simple boolean string mismatch
         }
@@ -124,7 +119,6 @@ ClientConfiguration::ClientConfiguration()
 
     if (use_new_async_client) {
         LOG(DEBUG) << "Using new AsyncClient";
-        // std::cerr << "DEBUG: ClientConfiguration: RUNAI_STREAMER_GCS_USE_ASYNC_CLIENT is TRUE" << std::endl;
 
         // For the new global client (or per-worker client), we want to partition the 
         // global resource budget among the workers.
@@ -145,7 +139,6 @@ ClientConfiguration::ClientConfiguration()
                    << " and GrpcBackgroundThreadPoolSizeOption to " << num_threads
                    << " (Worker Concurrency: " << worker_concurrency << ")";
     }
-    // std::cerr << "DEBUG: ClientConfiguration constructor finished" << std::endl;
 }
 
 }; // namespace runai::llm::streamer::impl::gcs

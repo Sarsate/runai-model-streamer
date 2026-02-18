@@ -120,7 +120,6 @@ struct ThreadPool
 
             try
             {
-                // std::cerr << "DEBUG: ThreadPool worker picked up request" << std::endl;
                 pool._handler(std::move(request), pool.stopped);
             }
             catch (...)
