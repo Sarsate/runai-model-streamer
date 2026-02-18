@@ -99,26 +99,39 @@ void AsyncClientGrpc::ExecuteTask(ReadTask&& task, std::atomic<bool>& stopped) {
     if (stopped) return;
     _active_tasks++;
 
-    // Helper to cleanup on exit
-    // We use a lambda to ensure we ALWAYS decrement, no matter where we return.
+    LOG(INFO) << "Task [" << task.request_id << "] Started execution. Key: " << task.key;
+
     auto finalize = [&](bool success) {
         _active_tasks--;
-        
-        // Decrement pending chunks
-        // If we are the LAST chunk (fetch_sub returns 1) AND the request is overall successful...
-        if (task.pending_chunks->fetch_sub(1) == 1) {
-            if (task.is_success->load()) {
-                LOG(DEBUG) << "Finished reading request " << task.request_id << " " << task.key << " offset " << task.offset << " size " << task.length;
-                task.responder->push({task.request_id, common::ResponseCode::Success});
+        if (!success) {
+            if (task.is_success->exchange(false)) {
+                task.responder->push({task.request_id, common::ResponseCode::FileAccessError});
+            }
+        } else {
+             if (task.pending_chunks->fetch_sub(1) == 1) {
+                if (task.is_success->load()) {
+                    LOG(DEBUG) << "Finished reading request " << task.request_id << " " << task.key << " offset " << task.offset << " size " << task.length;
+                    task.responder->push({task.request_id, common::ResponseCode::Success});
+                }
             }
         }
     };
 
-    auto descriptor = GetDescriptor(task.key, task.bucket_name, task.path_name);
+    std::shared_ptr<google::cloud::storage_experimental::ObjectDescriptor> descriptor;
+    
+    // NOTE: This call is unguarded. If it throws, _active_tasks leaks!
+    try {
+        LOG(INFO) << "Task [" << task.request_id << "] Calling GetDescriptor";
+        descriptor = GetDescriptor(task.key, task.bucket_name, task.path_name);
+        LOG(INFO) << "Task [" << task.request_id << "] GetDescriptor returned";
+    } catch (...) {
+        LOG(ERROR) << "Task [" << task.request_id << "] Exception in GetDescriptor for " << task.key;
+        finalize(false);
+        return;
+    }
+    
     if (!descriptor) {
-        if (task.is_success->exchange(false)) {
-            task.responder->push({task.request_id, common::ResponseCode::FileAccessError});
-        }
+        LOG(ERROR) << "Task [" << task.request_id << "] Descriptor is null";
         finalize(false);
         return;
     }
@@ -145,6 +158,7 @@ void AsyncClientGrpc::ExecuteTask(ReadTask&& task, std::atomic<bool>& stopped) {
         auto pending_read = reader.Read(std::move(token));
 
         // 2. Read Loop
+        LOG(INFO) << "Task [" << task.request_id << "] Starting Read loop";
         
         while (!stopped) {
             // Block until the *current* chunk arrives, with timeout logging
@@ -159,11 +173,8 @@ void AsyncClientGrpc::ExecuteTask(ReadTask&& task, std::atomic<bool>& stopped) {
 
             if (!result) {
                  LOG(ERROR) << "Read failed for request " << task.request_id << ": " << result.status().message();
-                 if (task.is_success->exchange(false)) {
-                    task.responder->push({task.request_id, common::ResponseCode::FileAccessError});
-                }
-                finalize(false);
-                return;
+                 finalize(false);
+                 return;
             }
 
             auto& payload = result->first;
@@ -180,9 +191,6 @@ void AsyncClientGrpc::ExecuteTask(ReadTask&& task, std::atomic<bool>& stopped) {
             for (const auto& chunk : payload.contents()) {
                 if (bytes_copied + chunk.size() > task.length) {
                     // Overflow
-                     if (task.is_success->exchange(false)) {
-                        task.responder->push({task.request_id, common::ResponseCode::FileAccessError});
-                    }
                     finalize(false);
                     return;
                 }
@@ -198,21 +206,17 @@ void AsyncClientGrpc::ExecuteTask(ReadTask&& task, std::atomic<bool>& stopped) {
 
         if (bytes_copied != task.length) {
              LOG(ERROR) << "Incomplete read for request " << task.request_id;
-             if (task.is_success->exchange(false)) {
-                task.responder->push({task.request_id, common::ResponseCode::FileAccessError});
-            }
-            finalize(false);
-            return;
+             finalize(false);
+             return;
         }
     } catch (...) {
-         if (task.is_success->exchange(false)) {
-            task.responder->push({task.request_id, common::ResponseCode::FileAccessError});
-        }
+        LOG(ERROR) << "Task [" << task.request_id << "] Exception in Read loop";
         finalize(false);
         return;
     }
 
     // Success path
+    LOG(INFO) << "Task [" << task.request_id << "] Finished successfully";
     finalize(true);
 }
 
@@ -275,22 +279,13 @@ void AsyncClientGrpc::Monitor() {
             for (auto it = _descriptors.begin(); it != _descriptors.end(); ) {
                 auto idle_time = std::chrono::duration_cast<std::chrono::seconds>(now - it->second.last_used).count();
                 
-                // Only expire if idle > 1s AND no other thread is holding it (use_count == 1 means only the map/future holds it)
-                bool expired = false;
-                if (idle_time >= 1) {
-                    auto& fut = it->second.descriptor_future;
-                    // Check if future is ready (using 0 timeout wait)
-                    if (fut.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
-                        const auto& descriptor = fut.get();
-                        // If descriptor is null (failed open that wasn't cleaned up) or use_count is 1
-                        if (!descriptor || descriptor.use_count() == 1) {
-                            expired = true;
-                        }
-                    }
-                }
-
-                if (expired) {
-                    it = _descriptors.erase(it);
+                if (idle_time >= 1 && it->second.descriptor_future.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+                     auto desc = it->second.descriptor_future.get();
+                     if (!desc || desc.use_count() == 1) {
+                        it = _descriptors.erase(it);
+                     } else {
+                        ++it;
+                     }
                 } else {
                     ++it;
                 }
