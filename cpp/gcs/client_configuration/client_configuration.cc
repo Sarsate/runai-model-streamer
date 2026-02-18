@@ -40,16 +40,17 @@ ClientConfiguration::ClientConfiguration()
     check_env("RUNAI_STREAMER_S3_TRACE");
     check_env("RUNAI_STREAMER_GCS_USE_ASYNC_CLIENT");
 
+    unsigned nprocs = std::thread::hardware_concurrency();
+    // Use at least 8 threads if hardware_concurrency cannot be computed.
+    LOG(SPAM) << "Hardware concurrency detected: " << nprocs;
+    unsigned default_max_concurrency = nprocs == 0 ? 8U : 1U;
+
     const auto max_connections = utils::getenv<unsigned long>("RUNAI_STREAMER_S3_MAX_CONNECTIONS", 0);
     unsigned long worker_concurrency = utils::getenv<unsigned long>("RUNAI_STREAMER_CONCURRENCY", 8UL);
 
     if (max_connections) {
         max_concurrency = max_connections;
     } else {
-        unsigned nprocs = std::thread::hardware_concurrency();
-        // Use at least 8 threads if hardware_concurrency cannot be computed.
-        LOG(SPAM) << "Hardware concurrency detected: " << nprocs;
-        unsigned default_max_concurrency = nprocs == 0 ? 8U : 1U;
         LOG(SPAM) << "Streamer worker concurrency: " << worker_concurrency;
         max_concurrency = std::max(static_cast<unsigned long>(default_max_concurrency), nprocs * 2 / worker_concurrency);
     }
@@ -130,18 +131,17 @@ ClientConfiguration::ClientConfiguration()
         // If concurrency is 1, it gets the full budget.
         // If concurrency is 20, each worker gets a slice.
         
-        int target_global_channels = 6;
-        int target_global_threads = 96;
+        const int kNumGrpcChannels = 6;
+        options.set<google::cloud::GrpcNumChannelsOption>(kNumGrpcChannels);
 
-        int num_channels = target_global_channels;
-        options.set<google::cloud::GrpcNumChannelsOption>(num_channels);
-
-        // Ensure at least 8 threads per worker to prevent starvation, 
-        // but otherwise scale down from the global budget.
-        int num_threads = std::max(8, target_global_threads / (int)worker_concurrency);
+        // thread pool size should be nproc / concurrency
+        // Handle nprocs=0 case (unknown)
+        unsigned safe_nprocs = nprocs == 0 ? 8 : nprocs;
+        int num_threads = std::max(1UL, safe_nprocs / worker_concurrency);
+        
         options.set<google::cloud::GrpcBackgroundThreadPoolSizeOption>(num_threads);
 
-        LOG(DEBUG) << "Setting GrpcNumChannelsOption to " << num_channels 
+        LOG(DEBUG) << "Setting GrpcNumChannelsOption to " << kNumGrpcChannels 
                    << " and GrpcBackgroundThreadPoolSizeOption to " << num_threads
                    << " (Worker Concurrency: " << worker_concurrency << ")";
     }
