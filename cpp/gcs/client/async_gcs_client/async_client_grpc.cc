@@ -281,7 +281,9 @@ void AsyncClientGrpc::Monitor() {
             std::unique_lock<std::shared_timed_mutex> lock(_descriptors_mutex);
             auto now = std::chrono::steady_clock::now();
             for (auto it = _descriptors.begin(); it != _descriptors.end(); ) {
-                if (std::chrono::duration_cast<std::chrono::seconds>(now - it->second.last_used).count() >= 1) {
+                auto idle_time = std::chrono::duration_cast<std::chrono::seconds>(now - it->second.last_used).count();
+                // Only expire if idle > 1s AND no other thread is holding it (use_count == 1 means only the map holds it)
+                if (idle_time >= 1 && it->second.descriptor.use_count() == 1) {
                     it = _descriptors.erase(it);
                 } else {
                     ++it;
