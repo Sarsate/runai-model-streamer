@@ -11,7 +11,13 @@ t_streamer = ctypes.c_void_p
 
 class LibstreamerDLLWrapper:
     def __init__(self, library_path):
-        self.lib = ctypes.CDLL(library_path)
+        import sys
+        # 0x1000 is RTLD_NODELETE on Linux. 
+        rtld_flags = 0x1000 if sys.platform.startswith('linux') else 0
+        try:
+            self.lib = ctypes.CDLL(library_path, mode=rtld_flags)
+        except TypeError:
+            self.lib = ctypes.CDLL(library_path)
 
         self.fn_runai_start = self.lib.runai_start
         self.fn_runai_start.argtypes = [ctypes.POINTER(t_streamer)]

@@ -61,6 +61,7 @@ private:
     std::shared_ptr<google::cloud::storage_experimental::AsyncClient> _client;
     
     struct CachedDescriptor {
+        std::shared_ptr<google::cloud::storage_experimental::ObjectDescriptor> descriptor;
         std::shared_future<std::shared_ptr<google::cloud::storage_experimental::ObjectDescriptor>> descriptor_future;
         std::chrono::steady_clock::time_point last_used;
     };
@@ -69,7 +70,6 @@ private:
     std::map<std::string, CachedDescriptor> _descriptors;
 
     std::atomic<bool> _stop{false};
-    utils::ThreadPool<ReadTask> _thread_pool;
     std::atomic<int> _active_tasks{0};
 
     // Monitor
@@ -77,6 +77,8 @@ private:
     std::mutex _monitor_mutex;
     std::condition_variable _monitor_cv;
     void Monitor();
+
+    utils::ThreadPool<ReadTask> _thread_pool;
 };
 
 } // namespace runai::llm::streamer::impl::gcs

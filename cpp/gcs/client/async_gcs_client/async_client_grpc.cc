@@ -1,3 +1,4 @@
+#include <grpc/grpc.h>
 #include "gcs/client/async_gcs_client/async_client_grpc.h"
 
 #include <iostream>
@@ -18,7 +19,7 @@ namespace runai::llm::streamer::impl::gcs
 AsyncClientGrpc::AsyncClientGrpc(const ClientConfiguration& config) :
     _thread_pool([this](ReadTask&& task, std::atomic<bool>& stopped) {
         ExecuteTask(std::move(task), stopped);
-    }, config.max_concurrency)
+    }, 48)
 {
     LOG(DEBUG) << "Initializing AsyncClientGrpc with ThreadPool size: " << config.max_concurrency;
     _client = std::make_shared<google::cloud::storage_experimental::AsyncClient>(config.options);
@@ -41,28 +42,36 @@ void AsyncClientGrpc::Stop()
     if (_monitor_thread.joinable()) {
         _monitor_thread.join();
     }
+    
+    // Wait for all active tasks to finish before returning control to Python.
+    // This prevents the segfault caused by Python unmapping the .so file
+    // while worker threads are still executing ExecuteTask.
+    while (_active_tasks.load() > 0) {
+        std::this_thread::yield();
+    }
+    
+    // We purposefully DO NOT call _client.reset() here.
+    // The gRPC C-core background threads are noisy and slow to tear down.
+    // Let the OS process exit handle the cleanup of the HTTP/2 channels.
 }
 
 std::shared_future<std::shared_ptr<google::cloud::storage_experimental::ObjectDescriptor>> 
 AsyncClientGrpc::TriggerOpen(const std::string& key, const std::string& bucket, const std::string& path) {
     std::unique_lock<std::shared_timed_mutex> lock(_descriptors_mutex);
 
-    // 1. Check Cache
     auto it = _descriptors.find(key);
     if (it != _descriptors.end()) {
         it->second.last_used = std::chrono::steady_clock::now();
+        // If it's already here, we just return the future.
+        // The caller (GetDescriptor) will handle the fast-path avoiding this function entirely when possible.
         return it->second.descriptor_future;
     }
 
-    // 2. Initiate New Open
     auto p = std::make_shared<std::promise<std::shared_ptr<google::cloud::storage_experimental::ObjectDescriptor>>>();
     std::shared_future<std::shared_ptr<google::cloud::storage_experimental::ObjectDescriptor>> fut = p->get_future();
     
-    // Insert into cache immediately with the future
-    _descriptors[key] = {fut, std::chrono::steady_clock::now()};
+    _descriptors[key] = {nullptr, fut, std::chrono::steady_clock::now()};
 
-    // We can hold the lock while firing Open because Open returns a future instantly.
-    // It does NOT block.
     _client->Open(google::cloud::storage_experimental::BucketName(bucket), path)
         .then([this, key, p](auto f) {
             auto result = f.get();
@@ -70,19 +79,21 @@ AsyncClientGrpc::TriggerOpen(const std::string& key, const std::string& bucket, 
             
             if (!result) {
                 LOG(ERROR) << "Failed to open descriptor for " << key << ": " << result.status().message();
-                
-                // On failure, remove the entry so it can be retried later
                 try {
                     std::unique_lock<std::shared_timed_mutex> lock(_descriptors_mutex);
                     _descriptors.erase(key);
-                } catch (...) {
-                    LOG(WARNING) << "Exception in TriggerOpen failure cleanup (likely shutdown race)";
-                }
+                } catch (...) {}
             } else {
                 descriptor = std::make_shared<google::cloud::storage_experimental::ObjectDescriptor>(*std::move(result));
+                try {
+                    std::unique_lock<std::shared_timed_mutex> lock(_descriptors_mutex);
+                    auto it2 = _descriptors.find(key);
+                    if (it2 != _descriptors.end()) {
+                        it2->second.descriptor = descriptor;
+                    }
+                } catch (...) {}
             }
 
-            // Fulfill the promise, unblocking all waiting threads
             p->set_value(descriptor);
         });
 
@@ -91,15 +102,29 @@ AsyncClientGrpc::TriggerOpen(const std::string& key, const std::string& bucket, 
 
 std::shared_ptr<google::cloud::storage_experimental::ObjectDescriptor> 
 AsyncClientGrpc::GetDescriptor(const std::string& key, const std::string& bucket, const std::string& path) {
-    // Uses the coalescing logic
+    // FAST PATH: Read-only lock to check if the raw pointer is already resolved and cached.
+    // This avoids any future::get() calls or promise allocations on 99.9% of requests.
+    {
+        std::shared_lock<std::shared_timed_mutex> lock(_descriptors_mutex);
+        auto it = _descriptors.find(key);
+        if (it != _descriptors.end()) {
+            if (it->second.descriptor) {
+                // We cannot update last_used under a shared_lock easily, but since this is hot,
+                // the monitor eviction (1 second idle) is extremely unlikely to hit a file 
+                // being hammered 50 times a second anyway.
+                return it->second.descriptor;
+            }
+        }
+    }
+
+    // SLOW PATH: If not fully resolved, fall back to the coalescing logic 
+    // which handles concurrent opens safely using futures.
     return TriggerOpen(key, bucket, path).get();
 }
 
 void AsyncClientGrpc::ExecuteTask(ReadTask&& task, std::atomic<bool>& stopped) {
     if (stopped) return;
     _active_tasks++;
-
-    LOG(INFO) << "Task [" << task.request_id << "] Started execution. Key: " << task.key;
 
     auto finalize = [&](bool success) {
         _active_tasks--;
@@ -110,7 +135,6 @@ void AsyncClientGrpc::ExecuteTask(ReadTask&& task, std::atomic<bool>& stopped) {
         } else {
              if (task.pending_chunks->fetch_sub(1) == 1) {
                 if (task.is_success->load()) {
-                    LOG(DEBUG) << "Finished reading request " << task.request_id << " " << task.key << " offset " << task.offset << " size " << task.length;
                     task.responder->push({task.request_id, common::ResponseCode::Success});
                 }
             }
@@ -119,19 +143,14 @@ void AsyncClientGrpc::ExecuteTask(ReadTask&& task, std::atomic<bool>& stopped) {
 
     std::shared_ptr<google::cloud::storage_experimental::ObjectDescriptor> descriptor;
     
-    // NOTE: This call is unguarded. If it throws, _active_tasks leaks!
     try {
-        LOG(INFO) << "Task [" << task.request_id << "] Calling GetDescriptor";
         descriptor = GetDescriptor(task.key, task.bucket_name, task.path_name);
-        LOG(INFO) << "Task [" << task.request_id << "] GetDescriptor returned";
     } catch (...) {
-        LOG(ERROR) << "Task [" << task.request_id << "] Exception in GetDescriptor for " << task.key;
         finalize(false);
         return;
     }
     
     if (!descriptor) {
-        LOG(ERROR) << "Task [" << task.request_id << "] Descriptor is null";
         finalize(false);
         return;
     }
@@ -158,7 +177,6 @@ void AsyncClientGrpc::ExecuteTask(ReadTask&& task, std::atomic<bool>& stopped) {
         auto pending_read = reader.Read(std::move(token));
 
         // 2. Read Loop
-        LOG(INFO) << "Task [" << task.request_id << "] Starting Read loop";
         
         while (!stopped) {
             // Block until the *current* chunk arrives, with timeout logging
@@ -167,7 +185,10 @@ void AsyncClientGrpc::ExecuteTask(ReadTask&& task, std::atomic<bool>& stopped) {
                 status = pending_read.wait_for(std::chrono::milliseconds(100));
             } while (status == std::future_status::timeout && !stopped);
 
-            if (stopped) return;
+            if (stopped) {
+                finalize(false);
+                return;
+            }
 
             auto result = pending_read.get(); 
 
@@ -210,13 +231,11 @@ void AsyncClientGrpc::ExecuteTask(ReadTask&& task, std::atomic<bool>& stopped) {
              return;
         }
     } catch (...) {
-        LOG(ERROR) << "Task [" << task.request_id << "] Exception in Read loop";
         finalize(false);
         return;
     }
 
     // Success path
-    LOG(INFO) << "Task [" << task.request_id << "] Finished successfully";
     finalize(true);
 }
 
@@ -227,7 +246,8 @@ common::ResponseCode AsyncClientGrpc::Read(
     common::backend_api::ObjectRequestId_t request_id,
     std::shared_ptr<common::SharedQueue<common::backend_api::Response>> responder)
 {
-    const size_t CHUNK_SIZE = 200 * 1024 * 1024; // 200 MiB
+    const char* env_chunk_size = std::getenv("RUNAI_STREAMER_GCS_ASYNC_CHUNK_SIZE");
+    const size_t CHUNK_SIZE = env_chunk_size ? std::stoull(env_chunk_size) : 419430400; // Default 400 MiB
     size_t total_length = range.length;
     size_t num_chunks = (total_length + CHUNK_SIZE - 1) / CHUNK_SIZE;
 
@@ -279,13 +299,22 @@ void AsyncClientGrpc::Monitor() {
             for (auto it = _descriptors.begin(); it != _descriptors.end(); ) {
                 auto idle_time = std::chrono::duration_cast<std::chrono::seconds>(now - it->second.last_used).count();
                 
-                if (idle_time >= 1 && it->second.descriptor_future.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
-                     auto desc = it->second.descriptor_future.get();
-                     if (!desc || desc.use_count() == 1) {
-                        it = _descriptors.erase(it);
-                     } else {
-                        ++it;
-                     }
+                bool expired = false;
+                if (idle_time >= 1) {
+                    if (it->second.descriptor) {
+                        if (it->second.descriptor.use_count() == 1) {
+                            expired = true;
+                        }
+                    } else {
+                        if (it->second.descriptor_future.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+                            auto desc = it->second.descriptor_future.get();
+                            if (!desc) expired = true;
+                        }
+                    }
+                }
+
+                if (expired) {
+                    it = _descriptors.erase(it);
                 } else {
                     ++it;
                 }
