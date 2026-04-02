@@ -2,6 +2,7 @@
 
 #include "google/cloud/storage/client.h"
 #include "google/cloud/grpc_options.h"
+#include "google/cloud/common_options.h"
 
 #include "common/exception/exception.h"
 #include "common/response_code/response_code.h"
@@ -119,13 +120,26 @@ ClientConfiguration::ClientConfiguration()
 
     if (use_new_async_client) {
         LOG(DEBUG) << "Using new AsyncClient";
+        const auto grpc_endpoint = utils::getenv<std::string>("RUNAI_STREAMER_GCS_GRPC_ENDPOINT", "");
+        const auto grpc_authority = utils::getenv<std::string>("RUNAI_STREAMER_GCS_GRPC_AUTHORITY", "");
+
+        if (!grpc_endpoint.empty()) {
+            LOG(INFO) << "Setting custom gRPC Endpoint: " << grpc_endpoint;
+            options.set<google::cloud::EndpointOption>(grpc_endpoint);
+
+            if (!grpc_authority.empty()) {
+                options.set<google::cloud::AuthorityOption>(grpc_authority);
+            } else {
+                options.set<google::cloud::AuthorityOption>(grpc_endpoint);
+            }
+        }
 
         // For the new global client (or per-worker client), we want to partition the 
         // global resource budget among the workers.
         // If concurrency is 1, it gets the full budget.
         // If concurrency is 20, each worker gets a slice.
         
-        const int kNumGrpcChannels = 6;
+        const int kNumGrpcChannels = 12;
         options.set<google::cloud::GrpcNumChannelsOption>(kNumGrpcChannels);
 
         // thread pool size should be nproc / concurrency

@@ -1,5 +1,9 @@
 .PHONY: build test clean
 
+export CFLAGS=-mno-avx512f -march=haswell
+export CXXFLAGS=-mno-avx512f -march=haswell
+
+
 build:
 	make -C runai_model_streamer build
 	make -C runai_model_streamer_gcs build

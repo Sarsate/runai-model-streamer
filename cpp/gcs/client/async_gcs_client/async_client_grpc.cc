@@ -19,7 +19,7 @@ namespace runai::llm::streamer::impl::gcs
 AsyncClientGrpc::AsyncClientGrpc(const ClientConfiguration& config) :
     _thread_pool([this](ReadTask&& task, std::atomic<bool>& stopped) {
         ExecuteTask(std::move(task), stopped);
-    }, 48)
+    }, 40)
 {
     LOG(DEBUG) << "Initializing AsyncClientGrpc with ThreadPool size: " << config.max_concurrency;
     _client = std::make_shared<google::cloud::storage_experimental::AsyncClient>(config.options);
@@ -38,6 +38,7 @@ void AsyncClientGrpc::Stop()
 {
     _stop = true;
     _monitor_cv.notify_all();
+    _thread_pool.stop();
 
     if (_monitor_thread.joinable()) {
         _monitor_thread.join();
