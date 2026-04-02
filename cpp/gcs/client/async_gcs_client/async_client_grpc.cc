@@ -202,13 +202,7 @@ void AsyncClientGrpc::ExecuteTask(ReadTask&& task, std::atomic<bool>& stopped) {
             auto& payload = result->first;
             auto next_token = std::move(result->second);
 
-            // PIPELINING OPTIMIZATION: 
-            // Kick off the *next* read request immediately, BEFORE we spend time copying data.
-            // This allows the network download of Chunk N+1 to happen in parallel with the CPU copy of Chunk N.
             bool has_more = next_token.valid();
-            if (has_more && !stopped) {
-                pending_read = reader.Read(std::move(next_token));
-            }
 
             for (const auto& chunk : payload.contents()) {
                 if (bytes_copied + chunk.size() > task.length) {
@@ -224,6 +218,10 @@ void AsyncClientGrpc::ExecuteTask(ReadTask&& task, std::atomic<bool>& stopped) {
             }
 
             if (!has_more) break;
+
+            if (!stopped) {
+                pending_read = reader.Read(std::move(next_token));
+            }
         }
 
         if (bytes_copied != task.length) {
