@@ -23,6 +23,13 @@ AsyncClientGrpc::AsyncClientGrpc(const ClientConfiguration& config) :
 {
     LOG(DEBUG) << "Initializing AsyncClientGrpc with ThreadPool size: " << config.max_concurrency;
     _client = std::make_shared<google::cloud::storage_experimental::AsyncClient>(config.options);
+    
+    const char* env_retries = std::getenv("RUNAI_STREAMER_GCS_MAX_RETRIES");
+    if (env_retries) _max_retries = std::stoul(env_retries);
+
+    const char* env_timeout = std::getenv("RUNAI_STREAMER_GCS_TIMEOUT_SECONDS");
+    if (env_timeout) _timeout_seconds = std::stoul(env_timeout);
+
     _monitor_thread = std::thread(&AsyncClientGrpc::Monitor, this);
 
     // Warmup: Trigger Auth and Connection Establishment
@@ -38,7 +45,7 @@ void AsyncClientGrpc::Stop()
 {
     _stop = true;
     _monitor_cv.notify_all();
-    _thread_pool.stop();
+    _thread_pool.stopped = true;
 
     if (_monitor_thread.joinable()) {
         _monitor_thread.join();
@@ -182,8 +189,30 @@ void AsyncClientGrpc::ExecuteTask(ReadTask&& task, std::atomic<bool>& stopped) {
         while (!stopped) {
             // Block until the *current* chunk arrives, with timeout logging
             std::future_status status;
+            int timeout_count = 0;
             do {
                 status = pending_read.wait_for(std::chrono::milliseconds(100));
+                if (status == std::future_status::timeout) {
+                    timeout_count++;
+                    if (timeout_count > (_timeout_seconds * 10)) {
+                        if (task.retry_count < _max_retries) {
+                            LOG(WARNING) << "Task " << task.request_id << " timed out. Re-opening stream and retrying (" << task.retry_count + 1 << "/" << _max_retries << ")";
+                            {
+                                std::unique_lock<std::shared_timed_mutex> lock(_descriptors_mutex);
+                                _descriptors.erase(task.key);
+                            }
+                            ReadTask retry_task = task;
+                            retry_task.retry_count++;
+                            _thread_pool.push(std::move(retry_task));
+                            _active_tasks--;
+                            return;
+                        } else {
+                            LOG(ERROR) << "Task " << task.request_id << " failed after " << _max_retries << " retries due to timeout.";
+                            finalize(false);
+                            return;
+                        }
+                    }
+                }
             } while (status == std::future_status::timeout && !stopped);
 
             if (stopped) {
@@ -195,8 +224,21 @@ void AsyncClientGrpc::ExecuteTask(ReadTask&& task, std::atomic<bool>& stopped) {
 
             if (!result) {
                  LOG(ERROR) << "Read failed for request " << task.request_id << ": " << result.status().message();
-                 finalize(false);
-                 return;
+                 if (task.retry_count < _max_retries) {
+                     LOG(WARNING) << "Retrying task " << task.request_id << " due to read error (" << task.retry_count + 1 << "/" << _max_retries << ")";
+                     {
+                         std::unique_lock<std::shared_timed_mutex> lock(_descriptors_mutex);
+                         _descriptors.erase(task.key);
+                     }
+                     ReadTask retry_task = task;
+                     retry_task.retry_count++;
+                     _thread_pool.push(std::move(retry_task));
+                     _active_tasks--;
+                     return;
+                 } else {
+                     finalize(false);
+                     return;
+                 }
             }
 
             auto& payload = result->first;

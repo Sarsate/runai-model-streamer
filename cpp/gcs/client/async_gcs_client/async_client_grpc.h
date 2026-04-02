@@ -51,6 +51,7 @@ private:
         // Shared state for multi-chunk requests (if we split them)
         std::shared_ptr<std::atomic<unsigned>> pending_chunks;
         std::shared_ptr<std::atomic<bool>> is_success;
+        unsigned retry_count = 0;
     };
 
     void ExecuteTask(ReadTask&& task, std::atomic<bool>& stopped);
@@ -71,6 +72,8 @@ private:
 
     std::atomic<bool> _stop{false};
     std::atomic<int> _active_tasks{0};
+    unsigned _max_retries = 3;
+    unsigned _timeout_seconds = 5;
 
     // Monitor
     std::thread _monitor_thread;
