@@ -77,8 +77,8 @@ private:
     std::atomic<bool> _stop{false};
     std::atomic<int> _active_tasks{0};
     unsigned _max_retries = 3;
-    unsigned _timeout_seconds = 5;
-    double _min_throughput_mbps = 50.0;
+    unsigned _timeout_seconds = 10;
+    double _min_throughput_mbps = 200.0;
 
     // Monitor
     std::thread _monitor_thread;

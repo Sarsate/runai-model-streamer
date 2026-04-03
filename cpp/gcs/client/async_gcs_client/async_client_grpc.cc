@@ -163,8 +163,18 @@ void AsyncClientGrpc::ExecuteTask(ReadTask&& task, std::atomic<bool>& stopped) {
     try {
         descriptor = GetDescriptor(task.key, task.bucket_name, task.path_name);
     } catch (...) {
-        finalize(false);
-        return;
+        if (task.retry_count < _max_retries) {
+            LOG(WARNING) << "Task " << task.request_id << " failed to get descriptor. Retrying (" << task.retry_count + 1 << "/" << _max_retries << ")";
+            ReadTask retry_task = task;
+            retry_task.retry_count++;
+            _thread_pool.push(std::move(retry_task));
+            _active_tasks--;
+            return;
+        } else {
+            LOG(ERROR) << "Task " << task.request_id << " failed to get descriptor after " << _max_retries << " retries.";
+            finalize(false);
+            return;
+        }
     }
     
     if (!descriptor) {
@@ -282,6 +292,31 @@ void AsyncClientGrpc::ExecuteTask(ReadTask&& task, std::atomic<bool>& stopped) {
                     it->second.total_time_spent_ms->fetch_add(elapsed_ms);
                 }
             }
+            // Slow stream detection for this chunk
+            if (elapsed_ms > 100 && payload_size > 1 * 1024 * 1024) { // Only check if it took > 100ms and read > 1MB
+                double chunk_throughput = (payload_size / (1024.0 * 1024.0)) / (elapsed_ms / 1000.0);
+                if (chunk_throughput < _min_throughput_mbps) {
+                    LOG(WARNING) << "Slow chunk read detected for request " << task.request_id 
+                                 << " (" << chunk_throughput << " MB/s). Invalidating descriptor.";
+                    {
+                        std::unique_lock<std::shared_timed_mutex> lock(_descriptors_mutex);
+                        _descriptors.erase(task.key);
+                    }
+                    // Trigger retry
+                    if (task.retry_count < _max_retries) {
+                         LOG(WARNING) << "Retrying task " << task.request_id << " due to slow read (" << task.retry_count + 1 << "/" << _max_retries << ")";
+                         ReadTask retry_task = task;
+                         retry_task.retry_count++;
+                         _thread_pool.push(std::move(retry_task));
+                         _active_tasks--;
+                         return;
+                    } else {
+                         LOG(ERROR) << "Task " << task.request_id << " failed after " << _max_retries << " retries due to slow reads.";
+                         finalize(false);
+                         return;
+                    }
+                }
+            }
 
             if (!has_more) break;
 
@@ -384,7 +419,7 @@ void AsyncClientGrpc::Monitor() {
                     auto bytes = it->second.total_bytes_read->load();
                     auto ms = it->second.total_time_spent_ms->load();
                     
-                    if (ms > 1000 && bytes > 10 * 1024 * 1024) { // Only check after 1 second and 10MB read
+                    if (ms > 1000) { // Check every 1 second, regardless of bytes read
                         double throughput_mbps = (bytes / (1024.0 * 1024.0)) / (ms / 1000.0);
                         if (throughput_mbps < _min_throughput_mbps) {
                             LOG(WARNING) << "Descriptor for " << it->first << " is too slow (" << throughput_mbps << " MB/s). Invalidating.";
