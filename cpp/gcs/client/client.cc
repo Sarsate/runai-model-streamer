@@ -36,7 +36,6 @@ GCSClient::GCSClient(const common::backend_api::ObjectClientConfig_t& config) :
     _responder(nullptr),
     _chunk_bytesize(config.default_storage_chunk_size)
 {
-    std::cerr << "--- Jetski: GCSClient constructor entered" << std::endl;
     if (_client_config.use_new_async_client) {
         _async_client_grpc = std::make_unique<AsyncClientGrpc>(_client_config);
     } else {
@@ -66,7 +65,6 @@ common::ResponseCode write_stream_to_buffer(
         char * dest_buffer,
         size_t bytesize,
         common::backend_api::ObjectRequestId_t request_id) {
-    std::cerr << "--- Jetski: Entering write_stream_to_buffer for request " << request_id << std::endl;
     size_t bytes_received = 0;
     char* ptr = dest_buffer;
     size_t remaining = bytesize;
@@ -83,11 +81,9 @@ common::ResponseCode write_stream_to_buffer(
     stream.Close();
 
     if (bytes_received != bytesize) {
-        std::cerr << "Read failed. Received " << bytes_received << " of " << bytesize << " bytes. GCS Status: " << stream.status().message() << std::endl;
         return common::ResponseCode::FileAccessError;
     }
     if (stream.bad()) {
-        std::cerr << "Stream bad. GCS Status: " << stream.status().message() << std::endl;
         return common::ResponseCode::FileAccessError;
     }
 
@@ -99,8 +95,6 @@ GCSClient::~GCSClient() {
 
 common::ResponseCode GCSClient::async_read(const char* path, common::backend_api::ObjectRange_t range, char* destination_buffer, common::backend_api::ObjectRequestId_t request_id)
 {
-    std::cerr << "--- Jetski: GCSClient::async_read called for path: " << path << " request_id: " << request_id << std::endl;
-
     if (_responder == nullptr)
     {
         _responder = std::make_shared<Responder>(1);
@@ -139,38 +133,28 @@ common::ResponseCode GCSClient::async_read(const char* path, common::backend_api
 
         _client->ReadObjectAsync(bucket_name, path_name, google::cloud::storage::ReadRange(offset_, offset_ + bytesize_)).then(
             [dest_buffer = buffer_, responder = _responder, request_id, bytesize_, counter, is_success](auto f) {
-            try {
-                auto stream = f.get();
-                auto response_code = write_stream_to_buffer(std::move(stream), dest_buffer, bytesize_, request_id);
-                if (response_code == common::ResponseCode::Success)
+            auto stream = f.get();
+            auto response_code = write_stream_to_buffer(std::move(stream), dest_buffer, bytesize_, request_id);
+            if (response_code == common::ResponseCode::Success)
+            {
+                const auto running = counter->fetch_sub(1);
+                // send success response only if all the requests have succeeded
+                // note that unsuccessful attempts do not update the counter
+                if (running == 1)
                 {
-                    const auto running = counter->fetch_sub(1);
-                    // send success response only if all the requests have succeeded
-                    // note that unsuccessful attempts do not update the counter
-                    if (running == 1)
-                    {
-                        common::backend_api::Response r(request_id, response_code);
-                        responder->push(std::move(r));
-                    }
+                    common::backend_api::Response r(request_id, response_code);
+                    responder->push(std::move(r));
                 }
-                else
-                {
-                    std::cerr << "Chunk read failed for request_id: " << request_id << " error: " << response_code << std::endl;
-                    // Note: currently a failure to read any sub range fails the entire read request
-                    //       a retry mechanism should be added for failed reads
-                    bool previous = is_success->exchange(false);
-                    // send error response only once
-                    if (previous)
-                    {
-                        common::backend_api::Response r(request_id, response_code);
-                        responder->push(std::move(r));
-                    }
-                }
-            } catch (const std::exception& e) {
-                std::cerr << "Exception in ReadObjectAsync future: " << e.what() << std::endl;
+            }
+            else
+            {
+                // Note: currently a failure to read any sub range fails the entire read request
+                //       a retry mechanism should be added for failed reads
                 bool previous = is_success->exchange(false);
-                if (previous) {
-                    common::backend_api::Response r(request_id, common::ResponseCode::FileAccessError);
+                // send error response only once
+                if (previous)
+                {
+                    common::backend_api::Response r(request_id, response_code);
                     responder->push(std::move(r));
                 }
             }
