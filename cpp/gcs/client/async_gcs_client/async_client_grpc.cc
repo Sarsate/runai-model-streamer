@@ -30,6 +30,9 @@ AsyncClientGrpc::AsyncClientGrpc(const ClientConfiguration& config) :
     const char* env_timeout = std::getenv("RUNAI_STREAMER_GCS_TIMEOUT_SECONDS");
     if (env_timeout) _timeout_seconds = std::stoul(env_timeout);
 
+    const char* env_min_throughput = std::getenv("RUNAI_STREAMER_MIN_THROUGHPUT_MBPS");
+    if (env_min_throughput) _min_throughput_mbps = std::stod(env_min_throughput);
+
     _monitor_thread = std::thread(&AsyncClientGrpc::Monitor, this);
 
     // Warmup: Trigger Auth and Connection Establishment
@@ -127,7 +130,13 @@ AsyncClientGrpc::GetDescriptor(const std::string& key, const std::string& bucket
 
     // SLOW PATH: If not fully resolved, fall back to the coalescing logic 
     // which handles concurrent opens safely using futures.
-    return TriggerOpen(key, bucket, path).get();
+    auto fut = TriggerOpen(key, bucket, path);
+    if (fut.wait_for(std::chrono::seconds(_timeout_seconds)) == std::future_status::ready) {
+        return fut.get();
+    } else {
+        LOG(ERROR) << "Timeout waiting for descriptor for " << key;
+        throw std::runtime_error("Timeout waiting for descriptor");
+    }
 }
 
 void AsyncClientGrpc::ExecuteTask(ReadTask&& task, std::atomic<bool>& stopped) {
@@ -182,6 +191,7 @@ void AsyncClientGrpc::ExecuteTask(ReadTask&& task, std::atomic<bool>& stopped) {
             finalize(false);
             return;
         }
+        auto read_start = std::chrono::steady_clock::now();
         auto pending_read = reader.Read(std::move(token));
 
         // 2. Read Loop
@@ -221,6 +231,8 @@ void AsyncClientGrpc::ExecuteTask(ReadTask&& task, std::atomic<bool>& stopped) {
             }
 
             auto result = pending_read.get(); 
+            auto read_end = std::chrono::steady_clock::now();
+            auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(read_end - read_start).count();
 
             if (!result) {
                  LOG(ERROR) << "Read failed for request " << task.request_id << ": " << result.status().message();
@@ -246,6 +258,7 @@ void AsyncClientGrpc::ExecuteTask(ReadTask&& task, std::atomic<bool>& stopped) {
 
             bool has_more = next_token.valid();
 
+            size_t payload_size = 0;
             for (const auto& chunk : payload.contents()) {
                 if (bytes_copied + chunk.size() > task.length) {
                     // Overflow
@@ -257,11 +270,23 @@ void AsyncClientGrpc::ExecuteTask(ReadTask&& task, std::atomic<bool>& stopped) {
                 std::memcpy(task.buffer + bytes_copied, chunk.data(), chunk.size());
                 
                 bytes_copied += chunk.size();
+                payload_size += chunk.size();
+            }
+
+            // Update descriptor metrics
+            {
+                std::shared_lock<std::shared_timed_mutex> lock(_descriptors_mutex);
+                auto it = _descriptors.find(task.key);
+                if (it != _descriptors.end()) {
+                    it->second.total_bytes_read->fetch_add(payload_size);
+                    it->second.total_time_spent_ms->fetch_add(elapsed_ms);
+                }
             }
 
             if (!has_more) break;
 
             if (!stopped) {
+                read_start = std::chrono::steady_clock::now();
                 pending_read = reader.Read(std::move(next_token));
             }
         }
@@ -350,6 +375,20 @@ void AsyncClientGrpc::Monitor() {
                         if (it->second.descriptor_future.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
                             auto desc = it->second.descriptor_future.get();
                             if (!desc) expired = true;
+                        }
+                    }
+                }
+
+                // Slow stream detection
+                if (!expired && it->second.descriptor) {
+                    auto bytes = it->second.total_bytes_read->load();
+                    auto ms = it->second.total_time_spent_ms->load();
+                    
+                    if (ms > 1000 && bytes > 10 * 1024 * 1024) { // Only check after 1 second and 10MB read
+                        double throughput_mbps = (bytes / (1024.0 * 1024.0)) / (ms / 1000.0);
+                        if (throughput_mbps < _min_throughput_mbps) {
+                            LOG(WARNING) << "Descriptor for " << it->first << " is too slow (" << throughput_mbps << " MB/s). Invalidating.";
+                            expired = true;
                         }
                     }
                 }

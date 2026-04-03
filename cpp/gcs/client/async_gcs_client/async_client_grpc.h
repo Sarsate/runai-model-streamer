@@ -65,6 +65,10 @@ private:
         std::shared_ptr<google::cloud::storage_experimental::ObjectDescriptor> descriptor;
         std::shared_future<std::shared_ptr<google::cloud::storage_experimental::ObjectDescriptor>> descriptor_future;
         std::chrono::steady_clock::time_point last_used;
+        
+        // New metrics for slow stream detection
+        std::shared_ptr<std::atomic<size_t>> total_bytes_read = std::make_shared<std::atomic<size_t>>(0);
+        std::shared_ptr<std::atomic<size_t>> total_time_spent_ms = std::make_shared<std::atomic<size_t>>(0);
     };
 
     std::shared_timed_mutex _descriptors_mutex;
@@ -74,6 +78,7 @@ private:
     std::atomic<int> _active_tasks{0};
     unsigned _max_retries = 3;
     unsigned _timeout_seconds = 5;
+    double _min_throughput_mbps = 50.0;
 
     // Monitor
     std::thread _monitor_thread;
